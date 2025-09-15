@@ -3,18 +3,13 @@ package config
 import (
 	"fmt"
 	"net"
-	"strings"
+	"net/netip"
+	"os"
+	"strconv"
 
-	"github.com/Dreamacro/clash/adapter/outboundgroup"
-	"github.com/Dreamacro/clash/common/structure"
+	"github.com/metacubex/mihomo/adapter/outboundgroup"
+	"github.com/metacubex/mihomo/common/structure"
 )
-
-func trimArr(arr []string) (r []string) {
-	for _, e := range arr {
-		r = append(r, strings.Trim(e, " "))
-	}
-	return
-}
 
 // Check if ProxyGroups form DAG(Directed Acyclic Graph), and sort all ProxyGroups by dependency order.
 // Meanwhile, record the original index in the config file.
@@ -149,20 +144,14 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 }
 
 func verifyIP6() bool {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return false
+	if skip, _ := strconv.ParseBool(os.Getenv("SKIP_SYSTEM_IPV6_CHECK")); skip {
+		return true
 	}
-	for _, addr := range addrs {
-		ipNet, isIpNet := addr.(*net.IPNet)
-		if isIpNet && !ipNet.IP.IsLoopback() {
-			if ipNet.IP.To16() != nil {
-				s := ipNet.IP.String()
-				for i := 0; i < len(s); i++ {
-					switch s[i] {
-					case ':':
-						return true
-					}
+	if iAddrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range iAddrs {
+			if prefix, err := netip.ParsePrefix(addr.String()); err == nil {
+				if addr := prefix.Addr().Unmap(); addr.Is6() && addr.IsGlobalUnicast() {
+					return true
 				}
 			}
 		}

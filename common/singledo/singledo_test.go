@@ -5,17 +5,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
+
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/atomic"
 )
 
 func TestBasic(t *testing.T) {
-	single := NewSingle[int](time.Millisecond * 30)
+	t.Parallel()
+	single := NewSingle[int](time.Millisecond * 200)
 	foo := 0
 	shardCount := atomic.NewInt32(0)
 	call := func() (int, error) {
 		foo++
-		time.Sleep(time.Millisecond * 5)
+		time.Sleep(time.Millisecond * 20)
 		return 0, nil
 	}
 
@@ -26,7 +28,7 @@ func TestBasic(t *testing.T) {
 		go func() {
 			_, _, shard := single.Do(call)
 			if shard {
-				shardCount.Inc()
+				shardCount.Add(1)
 			}
 			wg.Done()
 		}()
@@ -38,7 +40,8 @@ func TestBasic(t *testing.T) {
 }
 
 func TestTimer(t *testing.T) {
-	single := NewSingle[int](time.Millisecond * 30)
+	t.Parallel()
+	single := NewSingle[int](time.Millisecond * 200)
 	foo := 0
 	callM := func() (int, error) {
 		foo++
@@ -46,7 +49,7 @@ func TestTimer(t *testing.T) {
 	}
 
 	_, _, _ = single.Do(callM)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	_, _, shard := single.Do(callM)
 
 	assert.Equal(t, 1, foo)
@@ -54,7 +57,8 @@ func TestTimer(t *testing.T) {
 }
 
 func TestReset(t *testing.T) {
-	single := NewSingle[int](time.Millisecond * 30)
+	t.Parallel()
+	single := NewSingle[int](time.Millisecond * 200)
 	foo := 0
 	callM := func() (int, error) {
 		foo++

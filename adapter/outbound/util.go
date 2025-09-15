@@ -3,138 +3,114 @@ package outbound
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	xtls "github.com/xtls/go"
+	"fmt"
 	"net"
 	"net/netip"
+	"regexp"
 	"strconv"
-	"sync"
-	"time"
 
-	"github.com/Dreamacro/clash/component/resolver"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
+	"github.com/metacubex/mihomo/component/resolver"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
-
-var (
-	globalClientSessionCache  tls.ClientSessionCache
-	globalClientXSessionCache xtls.ClientSessionCache
-	once                      sync.Once
-)
-
-func tcpKeepAlive(c net.Conn) {
-	if tcp, ok := c.(*net.TCPConn); ok {
-		_ = tcp.SetKeepAlive(true)
-		_ = tcp.SetKeepAlivePeriod(30 * time.Second)
-	}
-}
-
-func getClientSessionCache() tls.ClientSessionCache {
-	once.Do(func() {
-		globalClientSessionCache = tls.NewLRUClientSessionCache(128)
-	})
-	return globalClientSessionCache
-}
-
-func getClientXSessionCache() xtls.ClientSessionCache {
-	once.Do(func() {
-		globalClientXSessionCache = xtls.NewLRUClientSessionCache(128)
-	})
-	return globalClientXSessionCache
-}
 
 func serializesSocksAddr(metadata *C.Metadata) []byte {
 	var buf [][]byte
 	addrType := metadata.AddrType()
-	aType := uint8(addrType)
-	p, _ := strconv.ParseUint(metadata.DstPort, 10, 16)
+	p := uint(metadata.DstPort)
 	port := []byte{uint8(p >> 8), uint8(p & 0xff)}
 	switch addrType {
-	case socks5.AtypDomainName:
+	case C.AtypDomainName:
 		lenM := uint8(len(metadata.Host))
 		host := []byte(metadata.Host)
-		buf = [][]byte{{aType, lenM}, host, port}
-	case socks5.AtypIPv4:
+		buf = [][]byte{{socks5.AtypDomainName, lenM}, host, port}
+	case C.AtypIPv4:
 		host := metadata.DstIP.AsSlice()
-		buf = [][]byte{{aType}, host, port}
-	case socks5.AtypIPv6:
+		buf = [][]byte{{socks5.AtypIPv4}, host, port}
+	case C.AtypIPv6:
 		host := metadata.DstIP.AsSlice()
-		buf = [][]byte{{aType}, host, port}
+		buf = [][]byte{{socks5.AtypIPv6}, host, port}
 	}
 	return bytes.Join(buf, nil)
 }
 
-func resolveUDPAddr(ctx context.Context, network, address string) (*net.UDPAddr, error) {
+func resolveUDPAddr(ctx context.Context, network, address string, prefer C.DNSPrefer) (*net.UDPAddr, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
 	}
 
-	ip, err := resolver.ResolveProxyServerHost(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	return net.ResolveUDPAddr(network, net.JoinHostPort(ip.String(), port))
-}
-
-func resolveUDPAddrWithPrefer(ctx context.Context, network, address string, prefer C.DNSPrefer) (*net.UDPAddr, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
 	var ip netip.Addr
-	var fallback netip.Addr
 	switch prefer {
 	case C.IPv4Only:
-		ip, err = resolver.ResolveIPv4ProxyServerHost(ctx, host)
+		ip, err = resolver.ResolveIPv4WithResolver(ctx, host, resolver.ProxyServerHostResolver)
 	case C.IPv6Only:
-		ip, err = resolver.ResolveIPv6ProxyServerHost(ctx, host)
+		ip, err = resolver.ResolveIPv6WithResolver(ctx, host, resolver.ProxyServerHostResolver)
 	case C.IPv6Prefer:
-		var ips []netip.Addr
-		ips, err = resolver.LookupIPProxyServerHost(ctx, host)
-		if err == nil {
-			for _, addr := range ips {
-				if addr.Is6() {
-					ip = addr
-					break
-				} else {
-					if !fallback.IsValid() {
-						fallback = addr
-					}
-				}
-			}
-		}
+		ip, err = resolver.ResolveIPPrefer6WithResolver(ctx, host, resolver.ProxyServerHostResolver)
 	default:
-		// C.IPv4Prefer, C.DualStack and other
-		var ips []netip.Addr
-		ips, err = resolver.LookupIPProxyServerHost(ctx, host)
-		if err == nil {
-			for _, addr := range ips {
-				if addr.Is4() {
-					ip = addr
-					break
-				} else {
-					if !fallback.IsValid() {
-						fallback = addr
-					}
-				}
-			}
-
-		}
-	}
-
-	if !ip.IsValid() && fallback.IsValid() {
-		ip = fallback
+		ip, err = resolver.ResolveIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
 	}
 
 	if err != nil {
 		return nil, err
 	}
-	return net.ResolveUDPAddr(network, net.JoinHostPort(ip.String(), port))
+
+	ip, port = resolver.LookupIP4P(ip, port)
+
+	var uint16Port uint16
+	if port, err := strconv.ParseUint(port, 10, 16); err == nil {
+		uint16Port = uint16(port)
+	} else {
+		return nil, err
+	}
+	// our resolver always unmap before return, so unneeded unmap at here
+	// which is different with net.ResolveUDPAddr maybe return 4in6 address
+	// 4in6 addresses can cause some strange effects on sing-based code
+	return net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, uint16Port)), nil
 }
 
 func safeConnClose(c net.Conn, err error) {
 	if err != nil && c != nil {
 		_ = c.Close()
 	}
+}
+
+var rateStringRegexp = regexp.MustCompile(`^(\d+)\s*([KMGT]?)([Bb])ps$`)
+
+func StringToBps(s string) uint64 {
+	if s == "" {
+		return 0
+	}
+
+	// when have not unit, use Mbps
+	if v, err := strconv.Atoi(s); err == nil {
+		return StringToBps(fmt.Sprintf("%d Mbps", v))
+	}
+
+	m := rateStringRegexp.FindStringSubmatch(s)
+	if m == nil {
+		return 0
+	}
+	var n uint64 = 1
+	switch m[2] {
+	case "T":
+		n *= 1000
+		fallthrough
+	case "G":
+		n *= 1000
+		fallthrough
+	case "M":
+		n *= 1000
+		fallthrough
+	case "K":
+		n *= 1000
+	}
+	v, _ := strconv.ParseUint(m[1], 10, 64)
+	n *= v
+	if m[3] == "b" {
+		// Bits, need to convert to bytes
+		n /= 8
+	}
+	return n
 }

@@ -1,24 +1,23 @@
 package common
 
 import (
-	"golang.org/x/net/idna"
 	"strings"
 
-	C "github.com/Dreamacro/clash/constant"
+	C "github.com/metacubex/mihomo/constant"
+	"golang.org/x/net/idna"
 )
 
 type Domain struct {
 	*Base
 	domain  string
 	adapter string
-	isIDNA  bool
 }
 
 func (d *Domain) RuleType() C.RuleType {
 	return C.Domain
 }
 
-func (d *Domain) Match(metadata *C.Metadata) (bool, string) {
+func (d *Domain) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	return metadata.RuleHost() == d.domain, d.adapter
 }
 
@@ -27,20 +26,15 @@ func (d *Domain) Adapter() string {
 }
 
 func (d *Domain) Payload() string {
-	domain := d.domain
-	if d.isIDNA {
-		domain, _ = idna.ToUnicode(domain)
-	}
-	return domain
+	return d.domain
 }
 
 func NewDomain(domain string, adapter string) *Domain {
-	actualDomain, _ := idna.ToASCII(domain)
+	punycode, _ := idna.ToASCII(strings.ToLower(domain))
 	return &Domain{
 		Base:    &Base{},
-		domain:  strings.ToLower(actualDomain),
+		domain:  punycode,
 		adapter: adapter,
-		isIDNA:  actualDomain != domain,
 	}
 }
 

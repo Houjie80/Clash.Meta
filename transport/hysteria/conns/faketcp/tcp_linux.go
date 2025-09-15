@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build linux && !no_fake_tcp
+// +build linux,!no_fake_tcp
 
 package faketcp
 
@@ -17,8 +17,10 @@ import (
 	"time"
 
 	"github.com/coreos/go-iptables/iptables"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/metacubex/gopacket"
+	"github.com/metacubex/gopacket/layers"
+
+	"github.com/metacubex/mihomo/component/dialer"
 )
 
 var (
@@ -392,21 +394,41 @@ func (conn *TCPConn) SyscallConn() (syscall.RawConn, error) {
 // Dial connects to the remote TCP port,
 // and returns a single packet-oriented connection
 func Dial(network, address string) (*TCPConn, error) {
+	// init gopacket.layers
+	layers.Init()
 	// remote address resolve
 	raddr, err := net.ResolveTCPAddr(network, address)
 	if err != nil {
 		return nil, err
 	}
 
+	var lTcpAddr *net.TCPAddr
+	var lIpAddr *net.IPAddr
+	rAddrPort := raddr.AddrPort()
+	ifaceName := dialer.DefaultInterface.Load()
+	if ifaceName == "" {
+		if finder := dialer.DefaultInterfaceFinder.Load(); finder != nil {
+			ifaceName = finder.FindInterfaceName(rAddrPort.Addr().Unmap())
+		}
+	}
+	if len(ifaceName) > 0 {
+		addr, err := dialer.LookupLocalAddrFromIfaceName(ifaceName, network, rAddrPort.Addr(), int(rAddrPort.Port()))
+		if err != nil {
+			return nil, err
+		}
+		lTcpAddr = addr.(*net.TCPAddr)
+		lIpAddr = &net.IPAddr{IP: lTcpAddr.IP}
+	}
+
 	// AF_INET
-	handle, err := net.DialIP("ip:tcp", nil, &net.IPAddr{IP: raddr.IP})
+	handle, err := net.DialIP("ip:tcp", lIpAddr, &net.IPAddr{IP: raddr.IP})
 	if err != nil {
 		return nil, err
 	}
 
 	// create an established tcp connection
 	// will hack this tcp connection for packet transmission
-	tcpconn, err := net.DialTCP(network, nil, raddr)
+	tcpconn, err := net.DialTCP(network, lTcpAddr, raddr)
 	if err != nil {
 		return nil, err
 	}
@@ -464,6 +486,8 @@ func Dial(network, address string) (*TCPConn, error) {
 // Listen acts like net.ListenTCP,
 // and returns a single packet-oriented connection
 func Listen(network, address string) (*TCPConn, error) {
+	// init gopacket.layers
+	layers.Init()
 	// fields
 	conn := new(TCPConn)
 	conn.flowTable = make(map[string]*tcpFlow)

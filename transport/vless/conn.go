@@ -3,61 +3,82 @@ package vless
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 
-	"github.com/Dreamacro/clash/common/buf"
-	N "github.com/Dreamacro/clash/common/net"
+	"github.com/metacubex/mihomo/common/buf"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/transport/vless/vision"
 
-	"github.com/gofrs/uuid"
-	xtls "github.com/xtls/go"
+	"github.com/gofrs/uuid/v5"
 	"google.golang.org/protobuf/proto"
 )
 
 type Conn struct {
 	N.ExtendedConn
 	dst      *DstAddr
-	id       *uuid.UUID
+	id       uuid.UUID
 	addons   *Addons
 	received bool
+	sent     bool
 }
 
 func (vc *Conn) Read(b []byte) (int, error) {
-	if vc.received {
-		return vc.ExtendedConn.Read(b)
+	if !vc.received {
+		if err := vc.recvResponse(); err != nil {
+			return 0, err
+		}
+		vc.received = true
 	}
-
-	if err := vc.recvResponse(); err != nil {
-		return 0, err
-	}
-	vc.received = true
 	return vc.ExtendedConn.Read(b)
 }
 
 func (vc *Conn) ReadBuffer(buffer *buf.Buffer) error {
-	if vc.received {
-		return vc.ExtendedConn.ReadBuffer(buffer)
+	if !vc.received {
+		if err := vc.recvResponse(); err != nil {
+			return err
+		}
+		vc.received = true
 	}
-
-	if err := vc.recvResponse(); err != nil {
-		return err
-	}
-	vc.received = true
 	return vc.ExtendedConn.ReadBuffer(buffer)
 }
 
-func (vc *Conn) sendRequest() (err error) {
-	requestLen := 1  // protocol version
-	requestLen += 16 // UUID
-	requestLen += 1  // addons length
+func (vc *Conn) Write(p []byte) (int, error) {
+	if !vc.sent {
+		if err := vc.sendRequest(p); err != nil {
+			return 0, err
+		}
+		vc.sent = true
+		return len(p), nil
+	}
+
+	return vc.ExtendedConn.Write(p)
+}
+
+func (vc *Conn) WriteBuffer(buffer *buf.Buffer) error {
+	if !vc.sent {
+		if err := vc.sendRequest(buffer.Bytes()); err != nil {
+			return err
+		}
+		vc.sent = true
+		return nil
+	}
+
+	return vc.ExtendedConn.WriteBuffer(buffer)
+}
+
+func (vc *Conn) sendRequest(p []byte) (err error) {
 	var addonsBytes []byte
 	if vc.addons != nil {
 		addonsBytes, err = proto.Marshal(vc.addons)
 		if err != nil {
-			return err
+			return
 		}
 	}
+
+	requestLen := 1  // protocol version
+	requestLen += 16 // UUID
+	requestLen += 1  // addons length
 	requestLen += len(addonsBytes)
 	requestLen += 1 // command
 	if !vc.dst.Mux {
@@ -65,9 +86,9 @@ func (vc *Conn) sendRequest() (err error) {
 		requestLen += 1 // addr type
 		requestLen += len(vc.dst.Addr)
 	}
-	_buffer := buf.StackNewSize(requestLen)
-	defer buf.KeepAlive(_buffer)
-	buffer := buf.Dup(_buffer)
+	requestLen += len(p)
+
+	buffer := buf.NewSize(requestLen)
 	defer buffer.Release()
 
 	buf.Must(
@@ -93,70 +114,66 @@ func (vc *Conn) sendRequest() (err error) {
 		)
 	}
 
+	buf.Must(buf.Error(buffer.Write(p)))
+
 	_, err = vc.ExtendedConn.Write(buffer.Bytes())
 	return
 }
 
-func (vc *Conn) recvResponse() error {
-	var err error
-	var buf [1]byte
-	_, err = io.ReadFull(vc.ExtendedConn, buf[:])
+func (vc *Conn) recvResponse() (err error) {
+	var buffer [2]byte
+	_, err = io.ReadFull(vc.ExtendedConn, buffer[:])
 	if err != nil {
 		return err
 	}
 
-	if buf[0] != Version {
+	if buffer[0] != Version {
 		return errors.New("unexpected response version")
 	}
 
-	_, err = io.ReadFull(vc.ExtendedConn, buf[:])
-	if err != nil {
-		return err
-	}
-
-	length := int64(buf[0])
+	length := int64(buffer[1])
 	if length != 0 { // addon data length > 0
 		io.CopyN(io.Discard, vc.ExtendedConn, length) // just discard
 	}
 
-	return nil
+	return
 }
 
 func (vc *Conn) Upstream() any {
 	return vc.ExtendedConn
 }
 
+func (vc *Conn) ReaderReplaceable() bool {
+	return vc.received
+}
+
+func (vc *Conn) WriterReplaceable() bool {
+	return vc.sent
+}
+
+func (vc *Conn) NeedHandshake() bool {
+	return !vc.sent
+}
+
 // newConn return a Conn instance
-func newConn(conn net.Conn, client *Client, dst *DstAddr) (*Conn, error) {
+func newConn(conn net.Conn, client *Client, dst *DstAddr) (net.Conn, error) {
 	c := &Conn{
 		ExtendedConn: N.NewExtendedConn(conn),
 		id:           client.uuid,
+		addons:       client.Addons,
 		dst:          dst,
 	}
 
-	if !dst.UDP && client.Addons != nil {
+	if client.Addons != nil {
 		switch client.Addons.Flow {
-		case XRO, XRD, XRS:
-			if xtlsConn, ok := conn.(*xtls.Conn); ok {
-				xtlsConn.RPRX = true
-				xtlsConn.SHOW = client.XTLSShow
-				xtlsConn.MARK = "XTLS"
-				if client.Addons.Flow == XRS {
-					client.Addons.Flow = XRD
-				}
-
-				if client.Addons.Flow == XRD {
-					xtlsConn.DirectMode = true
-				}
-				c.addons = client.Addons
-			} else {
-				return nil, fmt.Errorf("failed to use %s, maybe \"security\" is not \"xtls\"", client.Addons.Flow)
+		case XRV:
+			visionConn, err := vision.NewConn(c, conn, c.id)
+			if err != nil {
+				return nil, err
 			}
+			return visionConn, nil
 		}
 	}
 
-	if err := c.sendRequest(); err != nil {
-		return nil, err
-	}
 	return c, nil
 }

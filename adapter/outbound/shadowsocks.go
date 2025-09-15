@@ -2,26 +2,26 @@ package outbound
 
 import (
 	"context"
-	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
 
-	"github.com/Dreamacro/clash/common/structure"
-	"github.com/Dreamacro/clash/component/dialer"
-	tlsC "github.com/Dreamacro/clash/component/tls"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/shadowtls"
-	obfs "github.com/Dreamacro/clash/transport/simple-obfs"
-	"github.com/Dreamacro/clash/transport/socks5"
-	v2rayObfs "github.com/Dreamacro/clash/transport/v2ray-plugin"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/structure"
+	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/proxydialer"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/ntp"
+	gost "github.com/metacubex/mihomo/transport/gost-plugin"
+	"github.com/metacubex/mihomo/transport/restls"
+	obfs "github.com/metacubex/mihomo/transport/simple-obfs"
+	shadowtls "github.com/metacubex/mihomo/transport/sing-shadowtls"
+	v2rayObfs "github.com/metacubex/mihomo/transport/v2ray-plugin"
 
-	shadowsocks "github.com/metacubex/sing-shadowsocks"
-	"github.com/metacubex/sing-shadowsocks/shadowimpl"
-	"github.com/sagernet/sing/common/bufio"
-	M "github.com/sagernet/sing/common/metadata"
-	"github.com/sagernet/sing/common/uot"
+	shadowsocks "github.com/metacubex/sing-shadowsocks2"
+	"github.com/metacubex/sing/common/bufio"
+	M "github.com/metacubex/sing/common/metadata"
+	"github.com/metacubex/sing/common/uot"
 )
 
 type ShadowSocks struct {
@@ -33,21 +33,24 @@ type ShadowSocks struct {
 	obfsMode        string
 	obfsOption      *simpleObfsOption
 	v2rayOption     *v2rayObfs.Option
-	shadowTLSOption *shadowTLSOption
-	tlsConfig       *tls.Config
+	gostOption      *gost.Option
+	shadowTLSOption *shadowtls.ShadowTLSOption
+	restlsConfig    *restls.Config
 }
 
 type ShadowSocksOption struct {
 	BasicOption
-	Name       string         `proxy:"name"`
-	Server     string         `proxy:"server"`
-	Port       int            `proxy:"port"`
-	Password   string         `proxy:"password"`
-	Cipher     string         `proxy:"cipher"`
-	UDP        bool           `proxy:"udp,omitempty"`
-	Plugin     string         `proxy:"plugin,omitempty"`
-	PluginOpts map[string]any `proxy:"plugin-opts,omitempty"`
-	UDPOverTCP bool           `proxy:"udp-over-tcp,omitempty"`
+	Name              string         `proxy:"name"`
+	Server            string         `proxy:"server"`
+	Port              int            `proxy:"port"`
+	Password          string         `proxy:"password"`
+	Cipher            string         `proxy:"cipher"`
+	UDP               bool           `proxy:"udp,omitempty"`
+	Plugin            string         `proxy:"plugin,omitempty"`
+	PluginOpts        map[string]any `proxy:"plugin-opts,omitempty"`
+	UDPOverTCP        bool           `proxy:"udp-over-tcp,omitempty"`
+	UDPOverTCPVersion int            `proxy:"udp-over-tcp-version,omitempty"`
+	ClientFingerprint string         `proxy:"client-fingerprint,omitempty"`
 }
 
 type simpleObfsOption struct {
@@ -56,10 +59,25 @@ type simpleObfsOption struct {
 }
 
 type v2rayObfsOption struct {
+	Mode                     string            `obfs:"mode"`
+	Host                     string            `obfs:"host,omitempty"`
+	Path                     string            `obfs:"path,omitempty"`
+	TLS                      bool              `obfs:"tls,omitempty"`
+	ECHOpts                  ECHOptions        `obfs:"ech-opts,omitempty"`
+	Fingerprint              string            `obfs:"fingerprint,omitempty"`
+	Headers                  map[string]string `obfs:"headers,omitempty"`
+	SkipCertVerify           bool              `obfs:"skip-cert-verify,omitempty"`
+	Mux                      bool              `obfs:"mux,omitempty"`
+	V2rayHttpUpgrade         bool              `obfs:"v2ray-http-upgrade,omitempty"`
+	V2rayHttpUpgradeFastOpen bool              `obfs:"v2ray-http-upgrade-fast-open,omitempty"`
+}
+
+type gostObfsOption struct {
 	Mode           string            `obfs:"mode"`
 	Host           string            `obfs:"host,omitempty"`
 	Path           string            `obfs:"path,omitempty"`
 	TLS            bool              `obfs:"tls,omitempty"`
+	ECHOpts        ECHOptions        `obfs:"ech-opts,omitempty"`
 	Fingerprint    string            `obfs:"fingerprint,omitempty"`
 	Headers        map[string]string `obfs:"headers,omitempty"`
 	SkipCertVerify bool              `obfs:"skip-cert-verify,omitempty"`
@@ -67,14 +85,24 @@ type v2rayObfsOption struct {
 }
 
 type shadowTLSOption struct {
-	Password       string `obfs:"password"`
-	Host           string `obfs:"host"`
-	Fingerprint    string `obfs:"fingerprint,omitempty"`
-	SkipCertVerify bool   `obfs:"skip-cert-verify,omitempty"`
+	Password       string   `obfs:"password,omitempty"`
+	Host           string   `obfs:"host"`
+	Fingerprint    string   `obfs:"fingerprint,omitempty"`
+	SkipCertVerify bool     `obfs:"skip-cert-verify,omitempty"`
+	Version        int      `obfs:"version,omitempty"`
+	ALPN           []string `obfs:"alpn,omitempty"`
 }
 
-// StreamConn implements C.ProxyAdapter
-func (ss *ShadowSocks) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+type restlsOption struct {
+	Password     string `obfs:"password"`
+	Host         string `obfs:"host"`
+	VersionHint  string `obfs:"version-hint"`
+	RestlsScript string `obfs:"restls-script,omitempty"`
+}
+
+// StreamConnContext implements C.ProxyAdapter
+func (ss *ShadowSocks) StreamConnContext(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ net.Conn, err error) {
+	useEarly := false
 	switch ss.obfsMode {
 	case "tls":
 		c = obfs.NewTLSObfs(c, ss.obfsOption.Host)
@@ -82,44 +110,80 @@ func (ss *ShadowSocks) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, e
 		_, port, _ := net.SplitHostPort(ss.addr)
 		c = obfs.NewHTTPObfs(c, ss.obfsOption.Host, port)
 	case "websocket":
-		var err error
-		c, err = v2rayObfs.NewV2rayObfs(c, ss.v2rayOption)
+		if ss.v2rayOption != nil {
+			c, err = v2rayObfs.NewV2rayObfs(ctx, c, ss.v2rayOption)
+		} else if ss.gostOption != nil {
+			c, err = gost.NewGostWebsocket(ctx, c, ss.gostOption)
+		} else {
+			return nil, fmt.Errorf("plugin options is required")
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%s connect error: %w", ss.addr, err)
 		}
 	case shadowtls.Mode:
-		c = shadowtls.NewShadowTLS(c, ss.shadowTLSOption.Password, ss.tlsConfig)
+		c, err = shadowtls.NewShadowTLS(ctx, c, ss.shadowTLSOption)
+		if err != nil {
+			return nil, err
+		}
+		useEarly = true
+	case restls.Mode:
+		c, err = restls.NewRestls(ctx, c, ss.restlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("%s (restls) connect error: %w", ss.addr, err)
+		}
+		useEarly = true
+	}
+	useEarly = useEarly || N.NeedHandshake(c)
+	if !useEarly {
+		if ctx.Done() != nil {
+			done := N.SetupContextForConn(ctx, c)
+			defer done(&err)
+		}
 	}
 	if metadata.NetWork == C.UDP && ss.option.UDPOverTCP {
-		return ss.method.DialConn(c, M.ParseSocksaddr(uot.UOTMagicAddress+":443"))
+		uotDestination := uot.RequestDestination(uint8(ss.option.UDPOverTCPVersion))
+		if useEarly {
+			return ss.method.DialEarlyConn(c, uotDestination), nil
+		} else {
+			return ss.method.DialConn(c, uotDestination)
+		}
 	}
-	return ss.method.DialConn(c, M.ParseSocksaddr(metadata.RemoteAddress()))
+	if useEarly {
+		return ss.method.DialEarlyConn(c, M.ParseSocksaddrHostPort(metadata.String(), metadata.DstPort)), nil
+	} else {
+		return ss.method.DialConn(c, M.ParseSocksaddrHostPort(metadata.String(), metadata.DstPort))
+	}
 }
 
 // DialContext implements C.ProxyAdapter
-func (ss *ShadowSocks) DialContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (_ C.Conn, err error) {
-	return ss.DialContextWithDialer(ctx, dialer.NewDialer(ss.Base.DialOptions(opts...)...), metadata)
+func (ss *ShadowSocks) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
+	return ss.DialContextWithDialer(ctx, dialer.NewDialer(ss.DialOptions()...), metadata)
 }
 
 // DialContextWithDialer implements C.ProxyAdapter
 func (ss *ShadowSocks) DialContextWithDialer(ctx context.Context, dialer C.Dialer, metadata *C.Metadata) (_ C.Conn, err error) {
+	if len(ss.option.DialerProxy) > 0 {
+		dialer, err = proxydialer.NewByName(ss.option.DialerProxy, dialer)
+		if err != nil {
+			return nil, err
+		}
+	}
 	c, err := dialer.DialContext(ctx, "tcp", ss.addr)
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %w", ss.addr, err)
 	}
-	tcpKeepAlive(c)
 
 	defer func(c net.Conn) {
 		safeConnClose(c, err)
 	}(c)
 
-	c, err = ss.StreamConn(c, metadata)
+	c, err = ss.StreamConnContext(ctx, c, metadata)
 	return NewConn(c, ss), err
 }
 
 // ListenPacketContext implements C.ProxyAdapter
-func (ss *ShadowSocks) ListenPacketContext(ctx context.Context, metadata *C.Metadata, opts ...dialer.Option) (C.PacketConn, error) {
-	return ss.ListenPacketWithDialer(ctx, dialer.NewDialer(ss.Base.DialOptions(opts...)...), metadata)
+func (ss *ShadowSocks) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (C.PacketConn, error) {
+	return ss.ListenPacketWithDialer(ctx, dialer.NewDialer(ss.DialOptions()...), metadata)
 }
 
 // ListenPacketWithDialer implements C.ProxyAdapter
@@ -129,9 +193,18 @@ func (ss *ShadowSocks) ListenPacketWithDialer(ctx context.Context, dialer C.Dial
 		if err != nil {
 			return nil, err
 		}
-		return newPacketConn(uot.NewClientConn(tcpConn), ss), nil
+		return ss.ListenPacketOnStreamConn(ctx, tcpConn, metadata)
 	}
-	addr, err := resolveUDPAddrWithPrefer(ctx, "udp", ss.addr, ss.prefer)
+	if len(ss.option.DialerProxy) > 0 {
+		dialer, err = proxydialer.NewByName(ss.option.DialerProxy, dialer)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err = ss.ResolveUDP(ctx, metadata); err != nil {
+		return nil, err
+	}
+	addr, err := resolveUDPAddr(ctx, "udp", ss.addr, ss.prefer)
 	if err != nil {
 		return nil, err
 	}
@@ -140,21 +213,36 @@ func (ss *ShadowSocks) ListenPacketWithDialer(ctx context.Context, dialer C.Dial
 	if err != nil {
 		return nil, err
 	}
-	pc = ss.method.DialPacketConn(&bufio.BindPacketConn{PacketConn: pc, Addr: addr})
+	pc = ss.method.DialPacketConn(bufio.NewBindPacketConn(pc, addr))
 	return newPacketConn(pc, ss), nil
 }
 
 // SupportWithDialer implements C.ProxyAdapter
-func (ss *ShadowSocks) SupportWithDialer() bool {
-	return true
+func (ss *ShadowSocks) SupportWithDialer() C.NetWork {
+	return C.ALLNet
+}
+
+// ProxyInfo implements C.ProxyAdapter
+func (ss *ShadowSocks) ProxyInfo() C.ProxyInfo {
+	info := ss.Base.ProxyInfo()
+	info.DialerProxy = ss.option.DialerProxy
+	return info
 }
 
 // ListenPacketOnStreamConn implements C.ProxyAdapter
-func (ss *ShadowSocks) ListenPacketOnStreamConn(c net.Conn, metadata *C.Metadata) (_ C.PacketConn, err error) {
+func (ss *ShadowSocks) ListenPacketOnStreamConn(ctx context.Context, c net.Conn, metadata *C.Metadata) (_ C.PacketConn, err error) {
 	if ss.option.UDPOverTCP {
-		return newPacketConn(uot.NewClientConn(c), ss), nil
+		if err = ss.ResolveUDP(ctx, metadata); err != nil {
+			return nil, err
+		}
+		destination := M.SocksaddrFromNet(metadata.UDPAddr())
+		if ss.option.UDPOverTCPVersion == uot.LegacyVersion {
+			return newPacketConn(N.NewThreadSafePacketConn(uot.NewConn(c, uot.Request{Destination: destination})), ss), nil
+		} else {
+			return newPacketConn(N.NewThreadSafePacketConn(uot.NewLazyConn(c, uot.Request{Destination: destination})), ss), nil
+		}
 	}
-	return nil, errors.New("no support")
+	return nil, C.ErrNotSupport
 }
 
 // SupportUOT implements C.ProxyAdapter
@@ -164,15 +252,19 @@ func (ss *ShadowSocks) SupportUOT() bool {
 
 func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 	addr := net.JoinHostPort(option.Server, strconv.Itoa(option.Port))
-	method, err := shadowimpl.FetchMethod(option.Cipher, option.Password)
+	method, err := shadowsocks.CreateMethod(option.Cipher, shadowsocks.MethodOptions{
+		Password: option.Password,
+		TimeFunc: ntp.Now,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("ss %s initialize error: %w", addr, err)
+		return nil, fmt.Errorf("ss %s cipher: %s initialize error: %w", addr, option.Cipher, err)
 	}
 
 	var v2rayOption *v2rayObfs.Option
+	var gostOption *gost.Option
 	var obfsOption *simpleObfsOption
-	var shadowTLSOpt *shadowTLSOption
-	var tlsConfig *tls.Config
+	var shadowTLSOpt *shadowtls.ShadowTLSOption
+	var restlsConfig *restls.Config
 	obfsMode := ""
 
 	decoder := structure.NewDecoder(structure.Option{TagName: "obfs", WeaklyTypedInput: true})
@@ -198,6 +290,36 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		}
 		obfsMode = opts.Mode
 		v2rayOption = &v2rayObfs.Option{
+			Host:                     opts.Host,
+			Path:                     opts.Path,
+			Headers:                  opts.Headers,
+			Mux:                      opts.Mux,
+			V2rayHttpUpgrade:         opts.V2rayHttpUpgrade,
+			V2rayHttpUpgradeFastOpen: opts.V2rayHttpUpgradeFastOpen,
+		}
+
+		if opts.TLS {
+			v2rayOption.TLS = true
+			v2rayOption.SkipCertVerify = opts.SkipCertVerify
+			v2rayOption.Fingerprint = opts.Fingerprint
+
+			echConfig, err := opts.ECHOpts.Parse()
+			if err != nil {
+				return nil, fmt.Errorf("ss %s initialize v2ray-plugin error: %w", addr, err)
+			}
+			v2rayOption.ECHConfig = echConfig
+		}
+	} else if option.Plugin == "gost-plugin" {
+		opts := gostObfsOption{Host: "bing.com", Mux: true}
+		if err := decoder.Decode(option.PluginOpts, &opts); err != nil {
+			return nil, fmt.Errorf("ss %s initialize gost-plugin error: %w", addr, err)
+		}
+
+		if opts.Mode != "websocket" {
+			return nil, fmt.Errorf("ss %s obfs mode error: %s", addr, opts.Mode)
+		}
+		obfsMode = opts.Mode
+		gostOption = &gost.Option{
 			Host:    opts.Host,
 			Path:    opts.Path,
 			Headers: opts.Headers,
@@ -205,30 +327,58 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		}
 
 		if opts.TLS {
-			v2rayOption.TLS = true
-			v2rayOption.SkipCertVerify = opts.SkipCertVerify
+			gostOption.TLS = true
+			gostOption.SkipCertVerify = opts.SkipCertVerify
+			gostOption.Fingerprint = opts.Fingerprint
+
+			echConfig, err := opts.ECHOpts.Parse()
+			if err != nil {
+				return nil, fmt.Errorf("ss %s initialize gost-plugin error: %w", addr, err)
+			}
+			gostOption.ECHConfig = echConfig
 		}
 	} else if option.Plugin == shadowtls.Mode {
 		obfsMode = shadowtls.Mode
-		shadowTLSOpt = &shadowTLSOption{}
-		if err := decoder.Decode(option.PluginOpts, shadowTLSOpt); err != nil {
+		opt := &shadowTLSOption{
+			Version: 2,
+		}
+		if err := decoder.Decode(option.PluginOpts, opt); err != nil {
 			return nil, fmt.Errorf("ss %s initialize shadow-tls-plugin error: %w", addr, err)
 		}
 
-		tlsConfig = &tls.Config{
-			NextProtos:         shadowtls.DefaultALPN,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: shadowTLSOpt.SkipCertVerify,
-			ServerName:         shadowTLSOpt.Host,
+		shadowTLSOpt = &shadowtls.ShadowTLSOption{
+			Password:          opt.Password,
+			Host:              opt.Host,
+			Fingerprint:       opt.Fingerprint,
+			ClientFingerprint: option.ClientFingerprint,
+			SkipCertVerify:    opt.SkipCertVerify,
+			Version:           opt.Version,
 		}
 
-		if len(shadowTLSOpt.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
+		if opt.ALPN != nil { // structure's Decode will ensure value not nil when input has value even it was set an empty array
+			shadowTLSOpt.ALPN = opt.ALPN
 		} else {
-			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(tlsConfig, shadowTLSOpt.Fingerprint); err != nil {
-				return nil, err
-			}
+			shadowTLSOpt.ALPN = shadowtls.DefaultALPN
 		}
+	} else if option.Plugin == restls.Mode {
+		obfsMode = restls.Mode
+		restlsOpt := &restlsOption{}
+		if err := decoder.Decode(option.PluginOpts, restlsOpt); err != nil {
+			return nil, fmt.Errorf("ss %s initialize restls-plugin error: %w", addr, err)
+		}
+
+		restlsConfig, err = restls.NewRestlsConfig(restlsOpt.Host, restlsOpt.Password, restlsOpt.VersionHint, restlsOpt.RestlsScript, option.ClientFingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("ss %s initialize restls-plugin error: %w", addr, err)
+		}
+
+	}
+	switch option.UDPOverTCPVersion {
+	case uot.Version, uot.LegacyVersion:
+	case 0:
+		option.UDPOverTCPVersion = uot.LegacyVersion
+	default:
+		return nil, fmt.Errorf("ss %s unknown udp over tcp protocol version: %d", addr, option.UDPOverTCPVersion)
 	}
 
 	return &ShadowSocks{
@@ -237,6 +387,8 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 			addr:   addr,
 			tp:     C.Shadowsocks,
 			udp:    option.UDP,
+			tfo:    option.TFO,
+			mpTcp:  option.MPTCP,
 			iface:  option.Interface,
 			rmark:  option.RoutingMark,
 			prefer: C.NewDNSPrefer(option.IPVersion),
@@ -246,41 +398,9 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 		option:          &option,
 		obfsMode:        obfsMode,
 		v2rayOption:     v2rayOption,
+		gostOption:      gostOption,
 		obfsOption:      obfsOption,
 		shadowTLSOption: shadowTLSOpt,
-		tlsConfig:       tlsConfig,
+		restlsConfig:    restlsConfig,
 	}, nil
-}
-
-type ssPacketConn struct {
-	net.PacketConn
-	rAddr net.Addr
-}
-
-func (spc *ssPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	packet, err := socks5.EncodeUDPPacket(socks5.ParseAddrToSocksAddr(addr), b)
-	if err != nil {
-		return
-	}
-	return spc.PacketConn.WriteTo(packet[3:], spc.rAddr)
-}
-
-func (spc *ssPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, _, e := spc.PacketConn.ReadFrom(b)
-	if e != nil {
-		return 0, nil, e
-	}
-
-	addr := socks5.SplitAddr(b[:n])
-	if addr == nil {
-		return 0, nil, errors.New("parse addr error")
-	}
-
-	udpAddr := addr.UDPAddr()
-	if udpAddr == nil {
-		return 0, nil, errors.New("parse addr error")
-	}
-
-	copy(b, b[len(addr):])
-	return n - len(addr), udpAddr, e
 }

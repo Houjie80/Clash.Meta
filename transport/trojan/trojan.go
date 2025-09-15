@@ -1,25 +1,17 @@
 package trojan
 
 import (
-	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"sync"
 
-	"github.com/Dreamacro/clash/common/pool"
-	tlsC "github.com/Dreamacro/clash/component/tls"
-	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/transport/socks5"
-	"github.com/Dreamacro/clash/transport/vless"
-	"github.com/Dreamacro/clash/transport/vmess"
-	xtls "github.com/xtls/go"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/pool"
+	"github.com/metacubex/mihomo/transport/socks5"
 )
 
 const (
@@ -28,8 +20,8 @@ const (
 )
 
 var (
-	defaultALPN          = []string{"h2", "http/1.1"}
-	defaultWebsocketALPN = []string{"http/1.1"}
+	DefaultALPN          = []string{"h2", "http/1.1"}
+	DefaultWebsocketALPN = []string{"http/1.1"}
 
 	crlf = []byte{'\r', '\n'}
 )
@@ -39,165 +31,16 @@ type Command = byte
 const (
 	CommandTCP byte = 1
 	CommandUDP byte = 3
+	CommandMux byte = 0x7f
 
-	// for XTLS
-	commandXRD byte = 0xf0 // XTLS direct mode
-	commandXRO byte = 0xf1 // XTLS origin mode
+	KeyLength = 56
 )
 
-type Option struct {
-	Password          string
-	ALPN              []string
-	ServerName        string
-	SkipCertVerify    bool
-	Fingerprint       string
-	Flow              string
-	FlowShow          bool
-	ClientFingerprint string
-}
-
-type WebsocketOption struct {
-	Host    string
-	Port    string
-	Path    string
-	Headers http.Header
-}
-
-type Trojan struct {
-	option      *Option
-	hexPassword []byte
-}
-
-func (t *Trojan) StreamConn(conn net.Conn) (net.Conn, error) {
-	alpn := defaultALPN
-	if len(t.option.ALPN) != 0 {
-		alpn = t.option.ALPN
-	}
-	switch t.option.Flow {
-	case vless.XRO, vless.XRD, vless.XRS:
-		xtlsConfig := &xtls.Config{
-			NextProtos:         alpn,
-			MinVersion:         xtls.VersionTLS12,
-			InsecureSkipVerify: t.option.SkipCertVerify,
-			ServerName:         t.option.ServerName,
-		}
-
-		if len(t.option.Fingerprint) == 0 {
-			xtlsConfig = tlsC.GetGlobalXTLSConfig(xtlsConfig)
-		} else {
-			var err error
-			if xtlsConfig, err = tlsC.GetSpecifiedFingerprintXTLSConfig(xtlsConfig, t.option.Fingerprint); err != nil {
-				return nil, err
-			}
-		}
-
-		xtlsConn := xtls.Client(conn, xtlsConfig)
-
-		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
-		defer cancel()
-		if err := xtlsConn.HandshakeContext(ctx); err != nil {
-			return nil, err
-		}
-		return xtlsConn, nil
-	default:
-		tlsConfig := &tls.Config{
-			NextProtos:         alpn,
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: t.option.SkipCertVerify,
-			ServerName:         t.option.ServerName,
-		}
-
-		if len(t.option.Fingerprint) == 0 {
-			tlsConfig = tlsC.GetGlobalTLSConfig(tlsConfig)
-		} else {
-			var err error
-			if tlsConfig, err = tlsC.GetSpecifiedFingerprintTLSConfig(tlsConfig, t.option.Fingerprint); err != nil {
-				return nil, err
-			}
-		}
-
-		if len(t.option.ClientFingerprint) != 0 {
-			utlsConn, valid := vmess.GetUtlsConnWithClientFingerprint(conn, t.option.ClientFingerprint, tlsConfig)
-			if valid {
-				ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
-				defer cancel()
-
-				err := utlsConn.(*tlsC.UConn).HandshakeContext(ctx)
-				return utlsConn, err
-
-			}
-		}
-
-		tlsConn := tls.Client(conn, tlsConfig)
-
-		// fix tls handshake not timeout
-		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
-		defer cancel()
-
-		err := tlsConn.HandshakeContext(ctx)
-		return tlsConn, err
-	}
-}
-
-func (t *Trojan) StreamWebsocketConn(conn net.Conn, wsOptions *WebsocketOption) (net.Conn, error) {
-	alpn := defaultWebsocketALPN
-	if len(t.option.ALPN) != 0 {
-		alpn = t.option.ALPN
-	}
-
-	tlsConfig := &tls.Config{
-		NextProtos:         alpn,
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: t.option.SkipCertVerify,
-		ServerName:         t.option.ServerName,
-	}
-
-	return vmess.StreamWebsocketConn(conn, &vmess.WebsocketConfig{
-		Host:              wsOptions.Host,
-		Port:              wsOptions.Port,
-		Path:              wsOptions.Path,
-		Headers:           wsOptions.Headers,
-		TLS:               true,
-		TLSConfig:         tlsConfig,
-		ClientFingerprint: t.option.ClientFingerprint,
-	})
-}
-
-func (t *Trojan) PresetXTLSConn(conn net.Conn) (net.Conn, error) {
-	switch t.option.Flow {
-	case vless.XRO, vless.XRD, vless.XRS:
-		if xtlsConn, ok := conn.(*xtls.Conn); ok {
-			xtlsConn.RPRX = true
-			xtlsConn.SHOW = t.option.FlowShow
-			xtlsConn.MARK = "XTLS"
-			if t.option.Flow == vless.XRS {
-				t.option.Flow = vless.XRD
-			}
-
-			if t.option.Flow == vless.XRD {
-				xtlsConn.DirectMode = true
-			}
-		} else {
-			return conn, fmt.Errorf("failed to use %s, maybe \"security\" is not \"xtls\"", t.option.Flow)
-		}
-	}
-
-	return conn, nil
-}
-
-func (t *Trojan) WriteHeader(w io.Writer, command Command, socks5Addr []byte) error {
-	if command == CommandTCP {
-		if t.option.Flow == vless.XRD {
-			command = commandXRD
-		} else if t.option.Flow == vless.XRO {
-			command = commandXRO
-		}
-	}
-
+func WriteHeader(w io.Writer, hexPassword [KeyLength]byte, command Command, socks5Addr []byte) error {
 	buf := pool.GetBuffer()
 	defer pool.PutBuffer(buf)
 
-	buf.Write(t.hexPassword)
+	buf.Write(hexPassword[:])
 	buf.Write(crlf)
 
 	buf.WriteByte(command)
@@ -206,12 +49,6 @@ func (t *Trojan) WriteHeader(w io.Writer, command Command, socks5Addr []byte) er
 
 	_, err := w.Write(buf.Bytes())
 	return err
-}
-
-func (t *Trojan) PacketConn(conn net.Conn) net.PacketConn {
-	return &PacketConn{
-		Conn: conn,
-	}
 }
 
 func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
@@ -289,9 +126,7 @@ func ReadPacket(r io.Reader, payload []byte) (net.Addr, int, int, error) {
 	return uAddr, length, total - length, nil
 }
 
-func New(option *Option) *Trojan {
-	return &Trojan{option, hexSha224([]byte(option.Password))}
-}
+var _ N.EnhancePacketConn = (*PacketConn)(nil)
 
 type PacketConn struct {
 	net.Conn
@@ -340,10 +175,55 @@ func (pc *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, addr, nil
 }
 
-func hexSha224(data []byte) []byte {
-	buf := make([]byte, 56)
-	hash := sha256.New224()
-	hash.Write(data)
-	hex.Encode(buf, hash.Sum(nil))
-	return buf
+func (pc *PacketConn) WaitReadFrom() (data []byte, put func(), addr net.Addr, err error) {
+	pc.mux.Lock()
+	defer pc.mux.Unlock()
+
+	destination, err := socks5.ReadAddr0(pc.Conn)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	addr = destination.UDPAddr()
+
+	data = pool.Get(pool.UDPBufferSize)
+	put = func() {
+		_ = pool.Put(data)
+	}
+
+	_, err = io.ReadFull(pc.Conn, data[:2+2]) // u16be length + CR LF
+	if err != nil {
+		if put != nil {
+			put()
+		}
+		return nil, nil, nil, err
+	}
+	length := binary.BigEndian.Uint16(data)
+
+	if length > 0 {
+		data = data[:length]
+		_, err = io.ReadFull(pc.Conn, data)
+		if err != nil {
+			if put != nil {
+				put()
+			}
+			return nil, nil, nil, err
+		}
+	} else {
+		if put != nil {
+			put()
+		}
+		return nil, nil, addr, nil
+	}
+
+	return
+}
+
+func NewPacketConn(conn net.Conn) *PacketConn {
+	return &PacketConn{Conn: conn}
+}
+
+func Key(password string) (key [56]byte) {
+	hash := sha256.Sum224([]byte(password))
+	hex.Encode(key[:], hash[:])
+	return
 }

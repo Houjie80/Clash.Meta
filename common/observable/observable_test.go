@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/common/atomic"
+
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/atomic"
 )
 
 func iterator[T any](item []T) chan T {
@@ -44,7 +45,7 @@ func TestObservable_MultiSubscribe(t *testing.T) {
 	wg.Add(2)
 	waitCh := func(ch <-chan int) {
 		for range ch {
-			count.Inc()
+			count.Add(1)
 		}
 		wg.Done()
 	}
@@ -69,9 +70,11 @@ func TestObservable_SubscribeClosedSource(t *testing.T) {
 	src := NewObservable[int](iter)
 	data, _ := src.Subscribe()
 	<-data
-
-	_, closed := src.Subscribe()
-	assert.NotNil(t, closed)
+	select {
+	case <-src.stopCh:
+	case <-time.After(time.Second):
+		assert.Fail(t, "timeout not stop")
+	}
 }
 
 func TestObservable_UnSubscribeWithNotExistSubscription(t *testing.T) {

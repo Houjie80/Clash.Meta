@@ -2,7 +2,7 @@ package common
 
 import (
 	"fmt"
-	C "github.com/Dreamacro/clash/constant"
+	C "github.com/metacubex/mihomo/constant"
 	"strings"
 )
 
@@ -21,10 +21,8 @@ func NewNetworkType(network, adapter string) (*NetworkType, error) {
 	switch strings.ToUpper(network) {
 	case "TCP":
 		ntType.network = C.TCP
-		break
 	case "UDP":
 		ntType.network = C.UDP
-		break
 	default:
 		return nil, fmt.Errorf("unsupported network type, only TCP/UDP")
 	}
@@ -36,7 +34,7 @@ func (n *NetworkType) RuleType() C.RuleType {
 	return C.Network
 }
 
-func (n *NetworkType) Match(metadata *C.Metadata) (bool, string) {
+func (n *NetworkType) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, string) {
 	return n.network == metadata.NetWork, n.adapter
 }
 

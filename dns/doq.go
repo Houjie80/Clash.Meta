@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
-	tlsC "github.com/Dreamacro/clash/component/tls"
-	"github.com/metacubex/quic-go"
+	"github.com/metacubex/mihomo/component/ca"
+	tlsC "github.com/metacubex/mihomo/component/tls"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
 
-	"github.com/Dreamacro/clash/log"
+	"github.com/metacubex/quic-go"
 	D "github.com/miekg/dns"
 )
 
@@ -51,7 +53,7 @@ type dnsOverQUIC struct {
 
 	// conn is the current active QUIC connection.  It can be closed and
 	// re-opened when needed.
-	conn   quic.Connection
+	conn   *quic.Conn
 	connMu sync.RWMutex
 
 	// bytesPool is a *sync.Pool we use to store byte buffers in.  These byte
@@ -59,28 +61,31 @@ type dnsOverQUIC struct {
 	bytesPool      *sync.Pool
 	bytesPoolGuard sync.Mutex
 
-	addr         string
-	proxyAdapter string
-	r            *Resolver
+	addr           string
+	dialer         *dnsDialer
+	skipCertVerify bool
 }
 
 // type check
 var _ dnsClient = (*dnsOverQUIC)(nil)
 
 // newDoQ returns the DNS-over-QUIC Upstream.
-func newDoQ(resolver *Resolver, addr string, adapter string) (dnsClient, error) {
+func newDoQ(addr string, resolver *Resolver, params map[string]string, proxyAdapter C.ProxyAdapter, proxyName string) *dnsOverQUIC {
 	doq := &dnsOverQUIC{
-		addr:         addr,
-		proxyAdapter: adapter,
-		r:            resolver,
+		addr:   addr,
+		dialer: newDNSDialer(resolver, proxyAdapter, proxyName),
 		quicConfig: &quic.Config{
 			KeepAlivePeriod: QUICKeepAlivePeriod,
 			TokenStore:      newQUICTokenStore(),
 		},
 	}
 
+	if params["skip-cert-verify"] == "true" {
+		doq.skipCertVerify = true
+	}
+
 	runtime.SetFinalizer(doq, (*dnsOverQUIC).Close)
-	return doq, nil
+	return doq
 }
 
 // Address implements the Upstream interface for *dnsOverQUIC.
@@ -89,6 +94,7 @@ func (doq *dnsOverQUIC) Address() string { return doq.addr }
 func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	// When sending queries over a QUIC connection, the DNS Message ID MUST be
 	// set to zero.
+	m = m.Copy()
 	id := m.Id
 	m.Id = 0
 	defer func() {
@@ -130,11 +136,6 @@ func (doq *dnsOverQUIC) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.M
 	return msg, err
 }
 
-// Exchange implements the Upstream interface for *dnsOverQUIC.
-func (doq *dnsOverQUIC) Exchange(m *D.Msg) (msg *D.Msg, err error) {
-	return doq.ExchangeContext(context.Background(), m)
-}
-
 // Close implements the Upstream interface for *dnsOverQUIC.
 func (doq *dnsOverQUIC) Close() (err error) {
 	doq.connMu.Lock()
@@ -149,10 +150,14 @@ func (doq *dnsOverQUIC) Close() (err error) {
 	return err
 }
 
+func (doq *dnsOverQUIC) ResetConnection() {
+	doq.closeConnWithError(nil)
+}
+
 // exchangeQUIC attempts to open a QUIC connection, send the DNS message
 // through it and return the response it got from the server.
 func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.Msg, err error) {
-	var conn quic.Connection
+	var conn *quic.Conn
 	conn, err = doq.getConnection(ctx, true)
 	if err != nil {
 		return nil, err
@@ -164,7 +169,7 @@ func (doq *dnsOverQUIC) exchangeQUIC(ctx context.Context, msg *D.Msg) (resp *D.M
 		return nil, fmt.Errorf("failed to pack DNS message for DoQ: %w", err)
 	}
 
-	var stream quic.Stream
+	var stream *quic.Stream
 	stream, err = doq.openStream(ctx, conn)
 	if err != nil {
 		return nil, err
@@ -217,12 +222,12 @@ func (doq *dnsOverQUIC) getBytesPool() (pool *sync.Pool) {
 	return doq.bytesPool
 }
 
-// getConnection opens or returns an existing quic.Connection. useCached
+// getConnection opens or returns an existing *quic.Conn. useCached
 // argument controls whether we should try to use the existing cached
 // connection.  If it is false, we will forcibly create a new connection and
 // close the existing one if needed.
-func (doq *dnsOverQUIC) getConnection(ctx context.Context, useCached bool) (quic.Connection, error) {
-	var conn quic.Connection
+func (doq *dnsOverQUIC) getConnection(ctx context.Context, useCached bool) (*quic.Conn, error) {
+	var conn *quic.Conn
 	doq.connMu.RLock()
 	conn = doq.conn
 	if conn != nil && useCached {
@@ -277,7 +282,7 @@ func (doq *dnsOverQUIC) resetQUICConfig() {
 }
 
 // openStream opens a new QUIC stream for the specified connection.
-func (doq *dnsOverQUIC) openStream(ctx context.Context, conn quic.Connection) (quic.Stream, error) {
+func (doq *dnsOverQUIC) openStream(ctx context.Context, conn *quic.Conn) (*quic.Stream, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -297,19 +302,11 @@ func (doq *dnsOverQUIC) openStream(ctx context.Context, conn quic.Connection) (q
 }
 
 // openConnection opens a new QUIC connection.
-func (doq *dnsOverQUIC) openConnection(ctx context.Context) (conn quic.Connection, err error) {
-	tlsConfig := tlsC.GetGlobalTLSConfig(
-		&tls.Config{
-			InsecureSkipVerify: false,
-			NextProtos: []string{
-				NextProtoDQ,
-			},
-			SessionTicketsDisabled: false,
-		})
+func (doq *dnsOverQUIC) openConnection(ctx context.Context) (conn *quic.Conn, err error) {
 	// we're using bootstrapped address instead of what's passed to the function
 	// it does not create an actual connection, but it helps us determine
 	// what IP is actually reachable (when there're v4/v6 addresses).
-	rawConn, err := getDialHandler(doq.r, doq.proxyAdapter)(ctx, "udp", doq.addr)
+	rawConn, err := doq.dialer.DialContext(ctx, "udp", doq.addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open a QUIC connection: %w", err)
 	}
@@ -324,7 +321,7 @@ func (doq *dnsOverQUIC) openConnection(ctx context.Context) (conn quic.Connectio
 
 	p, err := strconv.Atoi(port)
 	udpAddr := net.UDPAddr{IP: net.ParseIP(ip), Port: p}
-	udp, err := listenPacket(ctx, doq.proxyAdapter, "udp", addr, doq.r)
+	udp, err := doq.dialer.ListenPacket(ctx, "udp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +331,24 @@ func (doq *dnsOverQUIC) openConnection(ctx context.Context) (conn quic.Connectio
 		return nil, err
 	}
 
-	conn, err = quic.DialContext(ctx, udp, &udpAddr, host, tlsConfig, doq.getQUICConfig())
+	tlsConfig, err := ca.GetTLSConfig(ca.Option{
+		TLSConfig: &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: doq.skipCertVerify,
+			NextProtos: []string{
+				NextProtoDQ,
+			},
+			SessionTicketsDisabled: false,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	transport := quic.Transport{Conn: udp}
+	transport.SetCreatedConn(true) // auto close conn
+	transport.SetSingleUse(true)   // auto close transport
+	conn, err = transport.Dial(ctx, &udpAddr, tlsC.UConfig(tlsConfig), doq.getQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("opening quic connection to %s: %w", doq.addr, err)
 	}
@@ -372,7 +386,7 @@ func (doq *dnsOverQUIC) closeConnWithError(err error) {
 }
 
 // readMsg reads the incoming DNS message from the QUIC stream.
-func (doq *dnsOverQUIC) readMsg(stream quic.Stream) (m *D.Msg, err error) {
+func (doq *dnsOverQUIC) readMsg(stream *quic.Stream) (m *D.Msg, err error) {
 	pool := doq.getBytesPool()
 	bufPtr := pool.Get().(*[]byte)
 
