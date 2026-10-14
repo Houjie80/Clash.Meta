@@ -11,11 +11,27 @@ import (
 
 type ShadowSocksOption struct {
 	BaseOption
-	Password  string    `inbound:"password"`
-	Cipher    string    `inbound:"cipher"`
-	UDP       bool      `inbound:"udp,omitempty"`
-	MuxOption MuxOption `inbound:"mux-option,omitempty"`
-	ShadowTLS ShadowTLS `inbound:"shadow-tls,omitempty"`
+	Password   string     `inbound:"password"`
+	Cipher     string     `inbound:"cipher"`
+	UDP        bool       `inbound:"udp,omitempty"`
+	MuxOption  MuxOption  `inbound:"mux-option,omitempty"`
+	ShadowTLS  ShadowTLS  `inbound:"shadow-tls,omitempty"`
+	ResTLS     ResTLS     `inbound:"res-tls,omitempty"`
+	JLSConfig  JLSConfig  `inbound:"jls-config,omitempty"`
+	KcpTun     KcpTun     `inbound:"kcp-tun,omitempty"`
+	SimpleObfs SimpleObfs `inbound:"simple-obfs,omitempty"`
+}
+
+type SimpleObfs struct {
+	Enable bool   `inbound:"enable,omitempty"`
+	Mode   string `inbound:"mode,omitempty"`
+}
+
+func (o SimpleObfs) Build() LC.SimpleObfs {
+	return LC.SimpleObfs{
+		Enable: o.Enable,
+		Mode:   o.Mode,
+	}
 }
 
 func (o ShadowSocksOption) Equal(config C.InboundConfig) bool {
@@ -38,13 +54,17 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 		Base:   base,
 		config: options,
 		ss: LC.ShadowsocksServer{
-			Enable:    true,
-			Listen:    base.RawAddress(),
-			Password:  options.Password,
-			Cipher:    options.Cipher,
-			Udp:       options.UDP,
-			MuxOption: options.MuxOption.Build(),
-			ShadowTLS: options.ShadowTLS.Build(),
+			Enable:     true,
+			Listen:     base.RawAddress(),
+			Password:   options.Password,
+			Cipher:     options.Cipher,
+			Udp:        options.UDP,
+			MuxOption:  options.MuxOption.Build(),
+			ShadowTLS:  options.ShadowTLS.Build(),
+			ResTLS:     options.ResTLS.Build(),
+			JLSConfig:  options.JLSConfig.Build(),
+			KcpTun:     options.KcpTun.Build(),
+			SimpleObfs: options.SimpleObfs.Build(),
 		},
 	}, nil
 }
@@ -68,7 +88,7 @@ func (s *ShadowSocks) Address() string {
 // Listen implements constant.InboundListener
 func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 	var err error
-	s.l, err = sing_shadowsocks.New(s.ss, tunnel, s.Additions()...)
+	s.l, err = sing_shadowsocks.New(s.ss, s.ListenConfig(), tunnel, s.Additions()...)
 	if err != nil {
 		return err
 	}

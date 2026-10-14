@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/profile/cachefile"
-	"github.com/metacubex/mihomo/component/trie"
-	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/metacubex/bbolt"
 	"github.com/stretchr/testify/assert"
@@ -38,12 +36,12 @@ func createCachefileStore(options Options) (*Pool, string, error) {
 		return nil, "", err
 	}
 
-	db, err := bbolt.Open(f.Name(), 0o666, &bbolt.Options{Timeout: time.Second})
+	db, err := bbolt.Open(f.Name(), 0o666, &bbolt.Options{Timeout: time.Second, NoStatistics: true})
 	if err != nil {
 		return nil, "", err
 	}
 
-	pool.store = newCachefileStore(&cachefile.CacheFile{DB: db})
+	pool.store = newCachefileStore(&cachefile.CacheFile{DB: db}, options.IPNet)
 	return pool, f.Name(), nil
 }
 
@@ -146,47 +144,6 @@ func TestPool_CycleUsed(t *testing.T) {
 	}
 }
 
-func TestPool_Skip(t *testing.T) {
-	ipnet := netip.MustParsePrefix("192.168.0.1/29")
-	tree := trie.New[struct{}]()
-	assert.NoError(t, tree.Insert("example.com", struct{}{}))
-	assert.False(t, tree.IsEmpty())
-	pools, tempfile, err := createPools(Options{
-		IPNet: ipnet,
-		Size:  10,
-		Host:  []C.DomainMatcher{tree.NewDomainSet()},
-	})
-	assert.Nil(t, err)
-	defer os.Remove(tempfile)
-
-	for _, pool := range pools {
-		assert.True(t, pool.ShouldSkipped("example.com"))
-		assert.False(t, pool.ShouldSkipped("foo.com"))
-		assert.False(t, pool.shouldSkipped("baz.com"))
-	}
-}
-
-func TestPool_SkipWhiteList(t *testing.T) {
-	ipnet := netip.MustParsePrefix("192.168.0.1/29")
-	tree := trie.New[struct{}]()
-	assert.NoError(t, tree.Insert("example.com", struct{}{}))
-	assert.False(t, tree.IsEmpty())
-	pools, tempfile, err := createPools(Options{
-		IPNet: ipnet,
-		Size:  10,
-		Host:  []C.DomainMatcher{tree.NewDomainSet()},
-		Mode:  C.FilterWhiteList,
-	})
-	assert.Nil(t, err)
-	defer os.Remove(tempfile)
-
-	for _, pool := range pools {
-		assert.False(t, pool.ShouldSkipped("example.com"))
-		assert.True(t, pool.ShouldSkipped("foo.com"))
-		assert.True(t, pool.ShouldSkipped("baz.com"))
-	}
-}
-
 func TestPool_MaxCacheSize(t *testing.T) {
 	ipnet := netip.MustParsePrefix("192.168.0.1/24")
 	pool, _ := New(Options{
@@ -253,6 +210,33 @@ func TestPool_Clone(t *testing.T) {
 	_, lastExist := newPool.LookBack(last)
 	assert.True(t, firstExist)
 	assert.True(t, lastExist)
+}
+
+func TestPool_CloneKeepsAllocationState(t *testing.T) {
+	ipnet := netip.MustParsePrefix("192.168.0.1/24")
+	pool, _ := New(Options{
+		IPNet: ipnet,
+		Size:  10,
+	})
+
+	foo := pool.Lookup("foo.com")
+	bar := pool.Lookup("bar.com")
+
+	newPool, _ := New(Options{
+		IPNet: ipnet,
+		Size:  10,
+	})
+	newPool.CloneFrom(pool)
+
+	// a fresh allocation must not overwrite the retained mappings
+	baz := newPool.Lookup("baz.com")
+	assert.NotEqual(t, foo, baz)
+	assert.NotEqual(t, bar, baz)
+	assert.Equal(t, foo, newPool.Lookup("foo.com"))
+	assert.Equal(t, bar, newPool.Lookup("bar.com"))
+	host, ok := newPool.LookBack(foo)
+	assert.True(t, ok)
+	assert.Equal(t, "foo.com", host)
 }
 
 func TestPool_Error(t *testing.T) {

@@ -21,6 +21,12 @@ func WithExternalController(externalController string) Option {
 	}
 }
 
+func WithExternalControllerTLS(externalControllerTLS string) Option {
+	return func(cfg *config.Config) {
+		cfg.Controller.ExternalControllerTLS = externalControllerTLS
+	}
+}
+
 func WithExternalControllerUnix(externalControllerUnix string) Option {
 	return func(cfg *config.Config) {
 		cfg.Controller.ExternalControllerUnix = externalControllerUnix
@@ -30,6 +36,12 @@ func WithExternalControllerUnix(externalControllerUnix string) Option {
 func WithExternalControllerPipe(externalControllerPipe string) Option {
 	return func(cfg *config.Config) {
 		cfg.Controller.ExternalControllerPipe = externalControllerPipe
+	}
+}
+
+func WithExternalControllerRoutingMark(externalControllerRoutingMark int) Option {
+	return func(cfg *config.Config) {
+		cfg.Controller.ExternalControllerRoutingMark = externalControllerRoutingMark
 	}
 }
 
@@ -50,16 +62,19 @@ func applyRoute(cfg *config.Config) {
 		route.SetUIPath(cfg.Controller.ExternalUI)
 	}
 	route.ReCreateServer(&route.Config{
-		Addr:        cfg.Controller.ExternalController,
-		TLSAddr:     cfg.Controller.ExternalControllerTLS,
-		UnixAddr:    cfg.Controller.ExternalControllerUnix,
-		PipeAddr:    cfg.Controller.ExternalControllerPipe,
-		Secret:      cfg.Controller.Secret,
-		Certificate: cfg.TLS.Certificate,
-		PrivateKey:  cfg.TLS.PrivateKey,
-		EchKey:      cfg.TLS.EchKey,
-		DohServer:   cfg.Controller.ExternalDohServer,
-		IsDebug:     cfg.General.LogLevel == log.DEBUG,
+		Addr:           cfg.Controller.ExternalController,
+		TLSAddr:        cfg.Controller.ExternalControllerTLS,
+		UnixAddr:       cfg.Controller.ExternalControllerUnix,
+		PipeAddr:       cfg.Controller.ExternalControllerPipe,
+		RoutingMark:    cfg.Controller.ExternalControllerRoutingMark,
+		Secret:         cfg.Controller.Secret,
+		Certificate:    cfg.TLS.Certificate,
+		PrivateKey:     cfg.TLS.PrivateKey,
+		ClientAuthType: cfg.TLS.ClientAuthType,
+		ClientAuthCert: cfg.TLS.ClientAuthCert,
+		EchKey:         cfg.TLS.EchKey,
+		DohServer:      cfg.Controller.ExternalDohServer,
+		IsDebug:        cfg.General.LogLevel == log.DEBUG,
 		Cors: route.Cors{
 			AllowOrigins:        cfg.Controller.Cors.AllowOrigins,
 			AllowPrivateNetwork: cfg.Controller.Cors.AllowPrivateNetwork,

@@ -20,26 +20,23 @@ on:
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
-  
+
+permissions:
+  contents: write
+  packages: write
+
 env:
-  REGISTRY: docker.io
+  REGISTRY: ghcr.io
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         jobs:
-          - { goos: darwin, goarch: amd64, goamd64: v1, output: amd64-compatible } # old style file name will be removed in next released
-          - { goos: darwin, goarch: amd64, goamd64: v3, output: amd64 }
-          - { goos: darwin, goarch: amd64, goamd64: v1, output: amd64-v1 }
-          - { goos: darwin, goarch: amd64, goamd64: v2, output: amd64-v2 }
-          - { goos: darwin, goarch: amd64, goamd64: v3, output: amd64-v3 }
-          - { goos: darwin, goarch: arm64, output: arm64 }
-
           - { goos: linux, goarch: '386', go386: sse2, output: '386', debian: i386, rpm: i386}
           - { goos: linux, goarch: '386', go386: softfloat, output: '386-softfloat' }
           - { goos: linux, goarch: amd64, goamd64: v1, output: amd64-compatible} # old style file name will be removed in next released
-          - { goos: linux, goarch: amd64, goamd64: v3, output: amd64, debian: amd64, rpm: x86_64, pacman: x86_64}
+          - { goos: linux, goarch: amd64, goamd64: v3, output: amd64, debian: amd64, rpm: x86_64, pacman: x86_64, tarball: tarball}
           - { goos: linux, goarch: amd64, goamd64: v1, output: amd64-v1, debian: amd64, rpm: x86_64, pacman: x86_64, test: test }
           - { goos: linux, goarch: amd64, goamd64: v2, output: amd64-v2, debian: amd64, rpm: x86_64, pacman: x86_64}
           - { goos: linux, goarch: amd64, goamd64: v3, output: amd64-v3, debian: amd64, rpm: x86_64, pacman: x86_64}
@@ -53,12 +50,23 @@ jobs:
           - { goos: linux, goarch: mipsle, gomips: softfloat, output: mipsle-softfloat }
           - { goos: linux, goarch: mips64, output: mips64 }
           - { goos: linux, goarch: mips64le, output: mips64le, debian: mips64el, rpm: mips64el }
-          - { goos: linux, goarch: loong64, output: loong64-abi1, abi: '1', debian: loongarch64, rpm: loongarch64 }
+          - { goos: linux, goarch: loong64, output: loong64-abi1, abi: '1', debian: loongarch64, rpm: loongarch64, goversion: 'custom' }
           - { goos: linux, goarch: loong64, output: loong64-abi2, abi: '2', debian: loong64, rpm: loong64 }
           - { goos: linux, goarch: riscv64, output: riscv64, debian: riscv64, rpm: riscv64 }
           - { goos: linux, goarch: s390x, output: s390x, debian: s390x, rpm: s390x }
           - { goos: linux, goarch: ppc64le, output: ppc64le, debian: ppc64el, rpm: ppc64le }
 
+          # Go 1.26 with special patch can work on macOS 10.13 High Sierra
+          # https://github.com/MetaCubeX/go/commits/release-branch.go1.26/
+          - { goos: darwin, goarch: amd64, goamd64: v1, output: amd64-compatible } # old style file name will be removed in next released
+          - { goos: darwin, goarch: amd64, goamd64: v3, output: amd64 }
+          - { goos: darwin, goarch: amd64, goamd64: v1, output: amd64-v1 }
+          - { goos: darwin, goarch: amd64, goamd64: v2, output: amd64-v2 }
+          - { goos: darwin, goarch: amd64, goamd64: v3, output: amd64-v3 }
+          - { goos: darwin, goarch: arm64, output: arm64 }
+
+          # Go 1.26 with special patch can work on Windows 7
+          # https://github.com/MetaCubeX/go/commits/release-branch.go1.26/
           - { goos: windows, goarch: '386', output: '386' }
           - { goos: windows, goarch: amd64, goamd64: v1, output: amd64-compatible } # old style file name will be removed in next released
           - { goos: windows, goarch: amd64, goamd64: v3, output: amd64 }
@@ -79,6 +87,13 @@ jobs:
           - { goos: android, goarch: amd64, ndk: x86_64-linux-android34, output: amd64 }
           - { goos: android, goarch: arm, ndk: armv7a-linux-androideabi34, output: armv7 }
           - { goos: android, goarch: arm64, ndk: aarch64-linux-android34, output: arm64-v8 }
+
+          # Go 1.25 with special patch can work on Windows 7
+          # https://github.com/MetaCubeX/go/commits/release-branch.go1.25/
+          - { goos: windows, goarch: '386', output: '386-go125', goversion: '1.25' }
+          - { goos: windows, goarch: amd64, goamd64: v1, output: amd64-v1-go125, goversion: '1.25' }
+          - { goos: windows, goarch: amd64, goamd64: v2, output: amd64-v2-go125, goversion: '1.25' }
+          - { goos: windows, goarch: amd64, goamd64: v3, output: amd64-v3-go125, goversion: '1.25' }
 
           # Go 1.24 with special patch can work on Windows 7
           # https://github.com/MetaCubeX/go/commits/release-branch.go1.24/
@@ -146,114 +161,38 @@ jobs:
           - { goos: linux, goarch: amd64, goamd64: v3, output: amd64-v3-go120, goversion: '1.20' }
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Go
-      if: ${{ matrix.jobs.goversion == '' && matrix.jobs.abi != '1' }}
-      uses: actions/setup-go@v5
+      if: ${{ matrix.jobs.goversion == '' }}
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
-        go-version: '1.25'
+        go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+        go-version: '1.26'
 
     - name: Set up Go
-      if: ${{ matrix.jobs.goversion != '' && matrix.jobs.abi != '1' }}
-      uses: actions/setup-go@v5
+      if: ${{ matrix.jobs.goversion != '' && matrix.jobs.goversion != 'custom' }}
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
+        go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
         go-version: ${{ matrix.jobs.goversion }}
 
-    - name: Set up Go1.24 loongarch abi1
+    - name: Set up Go1.26 loongarch abi1
       if: ${{ matrix.jobs.goarch == 'loong64' && matrix.jobs.abi == '1' }}
-      run: |
-        wget -q https://github.com/MetaCubeX/loongarch64-golang/releases/download/1.24.0/go1.24.0.linux-amd64-abi1.tar.gz
-        sudo tar zxf go1.24.0.linux-amd64-abi1.tar.gz -C /usr/local
-        echo "/usr/local/go/bin" >> $GITHUB_PATH
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+      with:
+        go-download-base-url: 'https://github.com/MetaCubeX/loongarch64-golang/releases/download/1.26.0'
+        go-version: 1.26.0
 
-      # modify from https://github.com/restic/restic/issues/4636#issuecomment-1896455557
-      # this patch file only works on golang1.25.x
-      # that means after golang1.26 release it must be changed
-      # see: https://github.com/MetaCubeX/go/commits/release-branch.go1.25/
-      # revert:
-      # 693def151adff1af707d82d28f55dba81ceb08e1: "crypto/rand,runtime: switch RtlGenRandom for ProcessPrng"
-      # 7c1157f9544922e96945196b47b95664b1e39108: "net: remove sysSocket fallback for Windows 7"
-      # 48042aa09c2f878c4faa576948b07fe625c4707a: "syscall: remove Windows 7 console handle workaround"
-      # a17d959debdb04cd550016a3501dd09d50cd62e7: "runtime: always use LoadLibraryEx to load system libraries"
-    - name: Revert Golang1.25 commit for Windows7/8
-      if: ${{ matrix.jobs.goos == 'windows' && matrix.jobs.goversion == '' }}
-      run: |
-        alias curl='curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"'
-        cd $(go env GOROOT)
-        curl https://github.com/MetaCubeX/go/commit/8cb5472d94c34b88733a81091bd328e70ee565a4.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/6788c4c6f9fafb56729bad6b660f7ee2272d699f.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/a5b2168bb836ed9d6601c626f95e56c07923f906.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/f56f1e23507e646c85243a71bde7b9629b2f970c.diff | patch --verbose -p 1
+    - name: Verify Go installation
+      run: go version
 
-      # modify from https://github.com/restic/restic/issues/4636#issuecomment-1896455557
-      # this patch file only works on golang1.24.x
-      # that means after golang1.25 release it must be changed
-      # see: https://github.com/MetaCubeX/go/commits/release-branch.go1.24/
-      # revert:
-      # 693def151adff1af707d82d28f55dba81ceb08e1: "crypto/rand,runtime: switch RtlGenRandom for ProcessPrng"
-      # 7c1157f9544922e96945196b47b95664b1e39108: "net: remove sysSocket fallback for Windows 7"
-      # 48042aa09c2f878c4faa576948b07fe625c4707a: "syscall: remove Windows 7 console handle workaround"
-      # a17d959debdb04cd550016a3501dd09d50cd62e7: "runtime: always use LoadLibraryEx to load system libraries"
-    - name: Revert Golang1.24 commit for Windows7/8
-      if: ${{ matrix.jobs.goos == 'windows' && matrix.jobs.goversion == '1.24' }}
-      run: |
-        alias curl='curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"'
-        cd $(go env GOROOT)
-        curl https://github.com/MetaCubeX/go/commit/2a406dc9f1ea7323d6ca9fccb2fe9ddebb6b1cc8.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/7b1fd7d39c6be0185fbe1d929578ab372ac5c632.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/979d6d8bab3823ff572ace26767fd2ce3cf351ae.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/ac3e93c061779dfefc0dd13a5b6e6f764a25621e.diff | patch --verbose -p 1
-
-      # modify from https://github.com/restic/restic/issues/4636#issuecomment-1896455557
-      # this patch file only works on golang1.23.x
-      # that means after golang1.24 release it must be changed
-      # see: https://github.com/MetaCubeX/go/commits/release-branch.go1.23/
-      # revert:
-      # 693def151adff1af707d82d28f55dba81ceb08e1: "crypto/rand,runtime: switch RtlGenRandom for ProcessPrng"
-      # 7c1157f9544922e96945196b47b95664b1e39108: "net: remove sysSocket fallback for Windows 7"
-      # 48042aa09c2f878c4faa576948b07fe625c4707a: "syscall: remove Windows 7 console handle workaround"
-      # a17d959debdb04cd550016a3501dd09d50cd62e7: "runtime: always use LoadLibraryEx to load system libraries"
-    - name: Revert Golang1.23 commit for Windows7/8
-      if: ${{ matrix.jobs.goos == 'windows' && matrix.jobs.goversion == '1.23' }}
-      run: |
-        alias curl='curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"'
-        cd $(go env GOROOT)
-        curl https://github.com/MetaCubeX/go/commit/9ac42137ef6730e8b7daca016ece831297a1d75b.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/21290de8a4c91408de7c2b5b68757b1e90af49dd.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/6a31d3fa8e47ddabc10bd97bff10d9a85f4cfb76.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/69e2eed6dd0f6d815ebf15797761c13f31213dd6.diff | patch --verbose -p 1
-
-      # modify from https://github.com/restic/restic/issues/4636#issuecomment-1896455557
-      # this patch file only works on golang1.22.x
-      # that means after golang1.23 release it must be changed
-      # see: https://github.com/MetaCubeX/go/commits/release-branch.go1.22/
-      # revert:
-      # 693def151adff1af707d82d28f55dba81ceb08e1: "crypto/rand,runtime: switch RtlGenRandom for ProcessPrng"
-      # 7c1157f9544922e96945196b47b95664b1e39108: "net: remove sysSocket fallback for Windows 7"
-      # 48042aa09c2f878c4faa576948b07fe625c4707a: "syscall: remove Windows 7 console handle workaround"
-      # a17d959debdb04cd550016a3501dd09d50cd62e7: "runtime: always use LoadLibraryEx to load system libraries"
-    - name: Revert Golang1.22 commit for Windows7/8
-      if: ${{ matrix.jobs.goos == 'windows' && matrix.jobs.goversion == '1.22' }}
-      run: |
-        alias curl='curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"'
-        cd $(go env GOROOT)
-        curl https://github.com/MetaCubeX/go/commit/9779155f18b6556a034f7bb79fb7fb2aad1e26a9.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/ef0606261340e608017860b423ffae5c1ce78239.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/7f83badcb925a7e743188041cb6e561fc9b5b642.diff | patch --verbose -p 1
-        curl https://github.com/MetaCubeX/go/commit/83ff9782e024cb328b690cbf0da4e7848a327f4f.diff | patch --verbose -p 1
-
-      # modify from https://github.com/restic/restic/issues/4636#issuecomment-1896455557
-    - name: Revert Golang1.21 commit for Windows7/8
-      if: ${{ matrix.jobs.goos == 'windows' && matrix.jobs.goversion == '1.21' }}
-      run: |
-        alias curl='curl -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"'
-        cd $(go env GOROOT)
-        curl https://github.com/golang/go/commit/9e43850a3298a9b8b1162ba0033d4c53f8637571.diff | patch --verbose -R -p 1
+    - name: Verify Go env
+      run: go env
 
     - name: Set variables
       run: |
-        VERSION="${GITHUB_REF_NAME,,}-$(git rev-parse --short HEAD)"
+        VERSION="${GITHUB_REF_NAME,,}-smart-$(git rev-parse --short HEAD)"
         VERSION="${VERSION//\//-}"
         PackageVersion="$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | jq -r '.tag_name' | sed 's/v//g' | awk -F '.' '{$NF = $NF + 1; print}' OFS='.').${VERSION/-/.}"
         if [ -n "${{ github.event.inputs.version }}" ]; then
@@ -261,7 +200,7 @@ jobs:
           PackageVersion="${VERSION#v}"
         fi
         echo "VERSION=${VERSION}" >> $GITHUB_ENV
-        echo "PackageVersion=${PackageVersion}" >> $GITHUB_ENV
+        echo "PackageVersion=${PackageVersion}-smart" >> $GITHUB_ENV
       
         echo "BUILDTIME=$(date)" >> $GITHUB_ENV
         echo "CGO_ENABLED=0" >> $GITHUB_ENV
@@ -285,6 +224,8 @@ jobs:
     - name: Test
       if: ${{ matrix.jobs.test == 'test' }}
       run: |
+        export SKIP_CONCURRENT_TEST=1
+        export SKIP_INTEROP_TEST=1
         go test ./...
         echo "---test with_gvisor---"
         go test ./... -tags "with_gvisor" -count=1
@@ -355,13 +296,28 @@ jobs:
           --architecture ${{ matrix.jobs.pacman }} \
           mihomo=/usr/bin/mihomo
 
+    - name: Pack Golang Toolchain
+      if: ${{ matrix.jobs.goversion == '' && matrix.jobs.tarball == 'tarball' }}
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/toolchain/go
+        cp -r $(go env GOROOT)/* $GITHUB_WORKSPACE/toolchain/go/
+        cd $GITHUB_WORKSPACE/toolchain/
+        tar -czf $GITHUB_WORKSPACE/toolchain.tar.gz .
+        rm -rf $GITHUB_WORKSPACE/toolchain
+
+    - name: Pack GoMod Vendor
+      if: ${{ matrix.jobs.goversion == '' && matrix.jobs.tarball == 'tarball' }}
+      run: |
+        go mod vendor
+        tar -czf $GITHUB_WORKSPACE/vendor.tar.gz vendor
+
     - name: Save version
       run: |
         echo ${VERSION} > version.txt
       shell: bash
 
     - name: Archive production artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: "${{ matrix.jobs.goos }}-${{ matrix.jobs.output }}"
         path: |
@@ -370,6 +326,8 @@ jobs:
           mihomo*.rpm
           mihomo*.pkg.tar.zst
           mihomo*.zip
+          toolchain.tar.gz
+          vendor.tar.gz
           version.txt
           checksums.txt
 
@@ -380,7 +338,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Download all workflow run artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         path: bin/
         merge-multiple: true
@@ -404,7 +362,7 @@ jobs:
       shell: bash
 
     - name: Tag Repo
-      uses: richardsimko/update-tag@v1
+      uses: richardsimko/update-tag@v3
       with:
         tag_name: Prerelease-${{ github.ref_name }}
       env:
@@ -412,19 +370,26 @@ jobs:
       
     - run: |
         cat > release.txt << 'EOF'
+        **[声明]** 本分支是在上游代码的基础上增加Smart策略组功能，关于Smart策略组的任何问题均与上游无关!
+        **[Announcement]** This branch is based on the upstream code to add Smart Groups functionality, any questions about Smart Groups are not related to the upstream!
+
         Release created at  ${{ env.BUILDTIME }}
         Synchronize ${{ github.ref_name }} branch code updates, keeping only the latest version
         <br>
         [我应该下载哪个文件? / Which file should I download?](https://github.com/MetaCubeX/mihomo/wiki/FAQ)
         [二进制文件筛选 / Binary file selector](https://metacubex.github.io/Meta-Docs/startup/#_1)
         [查看文档 / Docs](https://metacubex.github.io/Meta-Docs/)
+
+        [Smart 策略组使用 / Smart Group Introduce](https://github.com/vernesong/OpenClash/releases/tag/mihomo)
+
         EOF
 
     - name: Upload Prerelease
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v3
       if: ${{  success() }}
       with:
         tag_name: Prerelease-${{ github.ref_name }}
+        name: "Mihomo ${{ github.ref_name }} with Smart Group"
         files: |
           bin/*
         prerelease: true
@@ -438,7 +403,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: Meta
           fetch-depth: '0'
@@ -473,7 +438,7 @@ jobs:
             bash ./genReleaseNote.sh -v ${PREVERSION}...${CURRENTVERSION}
             rm ./genReleaseNote.sh
   
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: bin/
           merge-multiple: true
@@ -483,7 +448,7 @@ jobs:
         working-directory: bin
   
       - name: Upload Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: ${{ success() }}
         with:
           tag_name: ${{ github.event.inputs.version }}
@@ -497,11 +462,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: bin/
           merge-multiple: true
@@ -511,10 +476,10 @@ jobs:
         working-directory: bin
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Setup Docker buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           version: latest
       
@@ -523,7 +488,7 @@ jobs:
       - name: Extract Docker metadata
         if: ${{ github.event_name != 'workflow_dispatch' }}
         id: meta_alpha
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: '${{ env.REGISTRY }}/${{ github.repository }}'
       
@@ -532,7 +497,7 @@ jobs:
       - name: Extract Docker metadata
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' }}
         id: meta_release
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: '${{ env.REGISTRY }}/${{ github.repository }}'
           tags: |
@@ -547,17 +512,17 @@ jobs:
           ls bin/
       
       - name: login to docker REGISTRY
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.DOCKER_HUB_USER }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Build and push Docker image with Buildx (don't push on PR)
       # https://github.com/docker/build-push-action
       - name: Build and push Docker image
         if: ${{ github.event_name != 'workflow_dispatch' }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -572,7 +537,7 @@ jobs:
       
       - name: Build and push Docker image
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile

@@ -2,14 +2,14 @@ package route
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/log"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/render"
+	"github.com/metacubex/chi"
+	"github.com/metacubex/chi/render"
+	"github.com/metacubex/http"
 )
 
 func upgradeRouter() http.Handler {
@@ -18,6 +18,7 @@ func upgradeRouter() http.Handler {
 	if !embedMode { // disallow upgrade core/geo in embed mode
 		r.Post("/", upgradeCore)
 		r.Post("/geo", updateGeoDatabases)
+		r.Post("/lgbm", updateLgbmModel)
 	}
 	return r
 }
@@ -54,6 +55,21 @@ func upgradeCore(w http.ResponseWriter, r *http.Request) {
 
 func updateUI(w http.ResponseWriter, r *http.Request) {
 	err := updater.DefaultUiUpdater.DownloadUI()
+	if err != nil {
+		log.Warnln("%s", err)
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, newError(fmt.Sprintf("%s", err)))
+		return
+	}
+
+	render.JSON(w, r, render.M{"status": "ok"})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func updateLgbmModel(w http.ResponseWriter, r *http.Request) {
+	err := updater.UpdateLgbmModelDatabase()
 	if err != nil {
 		log.Warnln("%s", err)
 		render.Status(r, http.StatusInternalServerError)

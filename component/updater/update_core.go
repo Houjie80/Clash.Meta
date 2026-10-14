@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,14 +19,16 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
 	"github.com/metacubex/mihomo/log"
+
+	"github.com/metacubex/http"
 )
 
 const (
 	baseReleaseURL    = "https://github.com/MetaCubeX/mihomo/releases/latest/download/"
 	versionReleaseURL = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
 
-	baseAlphaURL    = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/"
-	versionAlphaURL = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt"
+	baseAlphaURL    = "https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/"
+	versionAlphaURL = "https://github.com/vernesong/mihomo/releases/download/Prerelease-Alpha/version.txt"
 
 	// MaxPackageFileSize is a maximum package file length in bytes. The largest
 	// package whose size is limited by this constant currently has the size of
@@ -57,14 +58,17 @@ func (u *CoreUpdater) CoreBaseName() string {
 		if runtime.GOOS == "android" {
 			// mihomo-android-arm64-v8
 			return fmt.Sprintf("mihomo-%s-%s-v8", runtime.GOOS, runtime.GOARCH)
-		} else {
-			// mihomo-linux-arm64
-			return fmt.Sprintf("mihomo-%s-%s", runtime.GOOS, runtime.GOARCH)
 		}
+		// mihomo-linux-arm64
+		return fmt.Sprintf("mihomo-%s-%s", runtime.GOOS, runtime.GOARCH)
 	case "mips", "mipsle":
 		// mihomo-linux-mips-hardfloat
 		return fmt.Sprintf("mihomo-%s-%s-%s", runtime.GOOS, runtime.GOARCH, features.GOMIPS)
 	case "amd64":
+		if runtime.GOOS == "android" {
+			// mihomo-android-amd64
+			return fmt.Sprintf("mihomo-%s-%s", runtime.GOOS, runtime.GOARCH)
+		}
 		// mihomo-linux-amd64-v1
 		return fmt.Sprintf("mihomo-%s-%s-%s", runtime.GOOS, runtime.GOARCH, features.GOAMD64)
 	default:

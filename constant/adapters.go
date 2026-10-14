@@ -21,6 +21,8 @@ const (
 	RejectDrop
 	Compatible
 	Pass
+	PassRule
+	Rematch
 	Dns
 
 	Relay
@@ -28,6 +30,7 @@ const (
 	Fallback
 	URLTest
 	LoadBalance
+	Smart
 
 	Shadowsocks
 	ShadowsocksR
@@ -44,6 +47,15 @@ const (
 	Ssh
 	Mieru
 	AnyTLS
+	Sudoku
+	Masque
+	TrustTunnel
+	ShadowQuic
+	OpenVPN
+	Tailscale
+	ZeroTier
+	EasyTier
+	GostRelay
 )
 
 const (
@@ -58,6 +70,7 @@ var ErrNotSupport = errors.New("no support")
 
 type Connection interface {
 	Chains() Chain
+	ProviderChains() Chain
 	AppendToChains(adapter ProxyAdapter)
 	RemoteDestination() string
 }
@@ -101,13 +114,14 @@ type Dialer interface {
 }
 
 type ProxyInfo struct {
-	XUDP        bool
-	TFO         bool
-	MPTCP       bool
-	SMUX        bool
-	Interface   string
-	RoutingMark int
-	DialerProxy string
+	XUDP         bool
+	TFO          bool
+	MPTCP        bool
+	SMUX         bool
+	Interface    string
+	RoutingMark  int
+	ProviderName string
+	DialerProxy  string
 }
 
 type ProxyAdapter interface {
@@ -120,17 +134,6 @@ type ProxyAdapter interface {
 	ProxyInfo() ProxyInfo
 	MarshalJSON() ([]byte, error)
 
-	// Deprecated: use DialContextWithDialer and ListenPacketWithDialer instead.
-	// StreamConn wraps a protocol around net.Conn with Metadata.
-	//
-	// Examples:
-	//	conn, _ := net.DialContext(context.Background(), "tcp", "host:port")
-	//	conn, _ = adapter.StreamConnContext(context.Background(), conn, metadata)
-	//
-	// It returns a C.Conn with protocol which start with
-	// a new session (if any)
-	StreamConnContext(ctx context.Context, c net.Conn, metadata *Metadata) (net.Conn, error)
-
 	// DialContext return a C.Conn with protocol which
 	// contains multiplexing-related reuse logic (if any)
 	DialContext(ctx context.Context, metadata *Metadata) (Conn, error)
@@ -138,10 +141,6 @@ type ProxyAdapter interface {
 
 	// SupportUOT return UDP over TCP support
 	SupportUOT() bool
-
-	SupportWithDialer() NetWork
-	DialContextWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (Conn, error)
-	ListenPacketWithDialer(ctx context.Context, dialer Dialer, metadata *Metadata) (PacketConn, error)
 
 	// IsL3Protocol return ProxyAdapter working in L3 (tell dns module not pass the domain to avoid loopback)
 	IsL3Protocol(metadata *Metadata) bool
@@ -151,11 +150,6 @@ type ProxyAdapter interface {
 
 	// Close releasing associated resources
 	Close() error
-}
-
-type Group interface {
-	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (mp map[string]uint16, err error)
-	Touch()
 }
 
 type DelayHistory struct {
@@ -175,15 +169,11 @@ type Proxy interface {
 	Adapter() ProxyAdapter
 	AliveForTestUrl(url string) bool
 	DelayHistory() []DelayHistory
+	DelayHistoryForTestUrl(url string) []DelayHistory
 	ExtraDelayHistories() map[string]ProxyState
 	LastDelayForTestUrl(url string) uint16
 	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error)
-
-	// Deprecated: use DialContext instead.
-	Dial(metadata *Metadata) (Conn, error)
-
-	// Deprecated: use DialPacketConn instead.
-	DialUDP(metadata *Metadata) (PacketConn, error)
+	StatusTest(ctx context.Context, url string) (status uint16, ok bool, err error)
 }
 
 // AdapterType is enum of adapter type
@@ -201,6 +191,10 @@ func (at AdapterType) String() string {
 		return "Compatible"
 	case Pass:
 		return "Pass"
+	case PassRule:
+		return "PassRule"
+	case Rematch:
+		return "Rematch"
 	case Dns:
 		return "Dns"
 	case Shadowsocks:
@@ -233,6 +227,24 @@ func (at AdapterType) String() string {
 		return "Mieru"
 	case AnyTLS:
 		return "AnyTLS"
+	case Sudoku:
+		return "Sudoku"
+	case Masque:
+		return "Masque"
+	case TrustTunnel:
+		return "TrustTunnel"
+	case ShadowQuic:
+		return "ShadowQuic"
+	case OpenVPN:
+		return "OpenVPN"
+	case Tailscale:
+		return "Tailscale"
+	case ZeroTier:
+		return "ZeroTier"
+	case EasyTier:
+		return "EasyTier"
+	case GostRelay:
+		return "GostRelay"
 	case Relay:
 		return "Relay"
 	case Selector:
@@ -243,6 +255,8 @@ func (at AdapterType) String() string {
 		return "URLTest"
 	case LoadBalance:
 		return "LoadBalance"
+	case Smart:
+		return "Smart"
 	default:
 		return "Unknown"
 	}

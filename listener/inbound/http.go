@@ -13,11 +13,13 @@ import (
 
 type HTTPOption struct {
 	BaseOption
-	Users         AuthUsers     `inbound:"users,omitempty"`
-	Certificate   string        `inbound:"certificate,omitempty"`
-	PrivateKey    string        `inbound:"private-key,omitempty"`
-	EchKey        string        `inbound:"ech-key,omitempty"`
-	RealityConfig RealityConfig `inbound:"reality-config,omitempty"`
+	Users          AuthUsers     `inbound:"users,omitempty"`
+	Certificate    string        `inbound:"certificate,omitempty"`
+	PrivateKey     string        `inbound:"private-key,omitempty"`
+	ClientAuthType string        `inbound:"client-auth-type,omitempty"`
+	ClientAuthCert string        `inbound:"client-auth-cert,omitempty"`
+	EchKey         string        `inbound:"ech-key,omitempty"`
+	RealityConfig  RealityConfig `inbound:"reality-config,omitempty"`
 }
 
 func (o HTTPOption) Equal(config C.InboundConfig) bool {
@@ -57,17 +59,21 @@ func (h *HTTP) Address() string {
 
 // Listen implements constant.InboundListener
 func (h *HTTP) Listen(tunnel C.Tunnel) error {
+	lc := h.ListenConfig()
 	for _, addr := range strings.Split(h.RawAddress(), ",") {
 		l, err := http.NewWithConfig(
 			LC.AuthServer{
-				Enable:        true,
-				Listen:        addr,
-				AuthStore:     h.config.Users.GetAuthStore(),
-				Certificate:   h.config.Certificate,
-				PrivateKey:    h.config.PrivateKey,
-				EchKey:        h.config.EchKey,
-				RealityConfig: h.config.RealityConfig.Build(),
+				Enable:         true,
+				Listen:         addr,
+				AuthStore:      h.config.Users.GetAuthStore(),
+				Certificate:    h.config.Certificate,
+				PrivateKey:     h.config.PrivateKey,
+				ClientAuthType: h.config.ClientAuthType,
+				ClientAuthCert: h.config.ClientAuthCert,
+				EchKey:         h.config.EchKey,
+				RealityConfig:  h.config.RealityConfig.Build(),
 			},
+			lc,
 			tunnel,
 			h.Additions()...,
 		)

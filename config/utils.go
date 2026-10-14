@@ -9,6 +9,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	"github.com/metacubex/mihomo/common/structure"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 // Check if ProxyGroups form DAG(Directed Acyclic Graph), and sort all ProxyGroups by dependency order.
@@ -143,6 +144,47 @@ func proxyGroupsDagSort(groupsConfig []map[string]any) error {
 	return fmt.Errorf("loop is detected in ProxyGroup, please check following ProxyGroups: %v", loopElements)
 }
 
+// validateDialerProxies checks if all dialer-proxy references are valid
+func validateDialerProxies(proxies map[string]C.Proxy) error {
+	graph := make(map[string]string) // proxy name -> dialer-proxy name
+
+	// collect all proxies with dialer-proxy configured
+	for name, proxy := range proxies {
+		dialerProxy := proxy.ProxyInfo().DialerProxy
+		if dialerProxy != "" {
+			// validate each dialer-proxy reference
+			_, exist := proxies[dialerProxy]
+			if !exist {
+				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", name, dialerProxy)
+			}
+
+			// build dependency graph
+			graph[name] = dialerProxy
+		}
+	}
+
+	// every proxy has at most one dialer-proxy, so walk each chain once: reaching a proxy
+	// of the current walk means a cycle, reaching one an earlier walk finished does not
+	const onPath, acyclic = 1, 2
+	state := make(map[string]uint8, len(graph))
+	var path []string
+	for name := range graph {
+		path = path[:0]
+		for current, ok := name, true; ok && state[current] != acyclic; current, ok = graph[current] {
+			if state[current] == onPath {
+				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+			}
+			state[current] = onPath
+			path = append(path, current)
+		}
+		for _, p := range path {
+			state[p] = acyclic
+		}
+	}
+
+	return nil
+}
+
 func verifyIP6() bool {
 	if skip, _ := strconv.ParseBool(os.Getenv("SKIP_SYSTEM_IPV6_CHECK")); skip {
 		return true
@@ -155,6 +197,10 @@ func verifyIP6() bool {
 				}
 			}
 		}
+	} else {
+		// eg: Calling net.InterfaceAddrs() fails on Android SDK 30
+		// https://github.com/golang/go/issues/40569
+		return true // just ignore
 	}
 	return false
 }

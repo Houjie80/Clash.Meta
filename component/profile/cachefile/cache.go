@@ -19,8 +19,11 @@ var (
 
 	bucketSelected         = []byte("selected")
 	bucketFakeip           = []byte("fakeip")
+	bucketFakeip6          = []byte("fakeip6")
 	bucketETag             = []byte("etag")
 	bucketSubscriptionInfo = []byte("subscriptioninfo")
+	bucketSmartStats       = []byte("smart_stats")
+	bucketStorage          = []byte("storage")
 )
 
 // CacheFile store and update the cache file
@@ -76,7 +79,7 @@ func (c *CacheFile) Close() error {
 }
 
 func initCache() {
-	options := bbolt.Options{Timeout: time.Second}
+	options := bbolt.Options{Timeout: time.Second, NoStatistics: true}
 	db, err := bbolt.Open(C.Path.Cache(), fileMode, &options)
 	switch err {
 	case bbolt.ErrInvalid, bbolt.ErrChecksum, bbolt.ErrVersionMismatch:

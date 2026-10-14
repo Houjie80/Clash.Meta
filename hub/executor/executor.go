@@ -25,13 +25,13 @@ import (
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
-	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/mihomo/component/updater"
 	"github.com/metacubex/mihomo/config"
 	C "github.com/metacubex/mihomo/constant"
-	"github.com/metacubex/mihomo/constant/provider"
+	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/dns"
 	"github.com/metacubex/mihomo/listener"
 	authStore "github.com/metacubex/mihomo/listener/auth"
@@ -39,7 +39,7 @@ import (
 	"github.com/metacubex/mihomo/listener/inner"
 	"github.com/metacubex/mihomo/listener/tproxy"
 	"github.com/metacubex/mihomo/log"
-	"github.com/metacubex/mihomo/ntp"
+	"github.com/metacubex/mihomo/ntp/ntp"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -96,6 +96,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 		}
 	}
 
+	closeSmart()
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
@@ -103,8 +104,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
-	updateNTP(cfg.NTP)
 	updateDNS(cfg.DNS, cfg.General.IPv6)
+	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
 	updateListeners(cfg.General, cfg.Listeners, force)
 	updateTun(cfg.General) // tun should not care "force"
 	updateIPTables(cfg)
@@ -166,20 +167,22 @@ func GetGeneral() *config.General {
 			ASN:     geodata.ASNUrl(),
 			GeoSite: geodata.GeoSiteUrl(),
 		},
-		GeoAutoUpdate:           updater.GeoAutoUpdate(),
-		GeoUpdateInterval:       updater.GeoUpdateInterval(),
-		GeodataMode:             geodata.GeodataMode(),
-		GeodataLoader:           geodata.LoaderName(),
-		GeositeMatcher:          geodata.SiteMatcherName(),
-		TCPConcurrent:           dialer.GetTcpConcurrent(),
-		FindProcessMode:         tunnel.FindProcessMode(),
-		Sniffing:                tunnel.IsSniffing(),
-		GlobalClientFingerprint: tlsC.GetGlobalFingerprint(),
-		GlobalUA:                mihomoHttp.UA(),
-		ETagSupport:             resource.ETag(),
-		KeepAliveInterval:       int(keepalive.KeepAliveInterval() / time.Second),
-		KeepAliveIdle:           int(keepalive.KeepAliveIdle() / time.Second),
-		DisableKeepAlive:        keepalive.DisableKeepAlive(),
+		GeoAutoUpdate:      updater.GeoAutoUpdate(),
+		GeoUpdateInterval:  updater.GeoUpdateInterval(),
+		GeodataMode:        geodata.GeodataMode(),
+		GeodataLoader:      geodata.LoaderName(),
+		GeositeMatcher:     geodata.SiteMatcherName(),
+		TCPConcurrent:      dialer.GetTcpConcurrent(),
+		FindProcessMode:    tunnel.FindProcessMode(),
+		Sniffing:           tunnel.IsSniffing(),
+		GlobalUA:           mihomoHttp.UA(),
+		ETagSupport:        resource.ETag(),
+		KeepAliveInterval:  int(keepalive.KeepAliveInterval() / time.Second),
+		KeepAliveIdle:      int(keepalive.KeepAliveIdle() / time.Second),
+		DisableKeepAlive:   keepalive.DisableKeepAlive(),
+		LgbmAutoUpdate:     updater.LgbmAutoUpdate(),
+		LgbmUpdateInterval: updater.LgbmUpdateInterval(),
+		LgbmUrl:            lightgbm.LgbmUrl(),
 	}
 
 	return general
@@ -229,10 +232,11 @@ func updateNTP(c *config.NTP) {
 			net.JoinHostPort(c.Server, strconv.Itoa(c.Port)),
 			time.Duration(c.Interval),
 			c.DialerProxy,
+			tunnel.Tunnel,
 			c.WriteToSystem,
 		)
 	} else {
-		ntp.ReCreateNTPService("", 0, "", false)
+		ntp.ReCreateNTPService("", 0, "", nil, false)
 	}
 }
 
@@ -240,42 +244,51 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	if !c.Enable {
 		resolver.DefaultResolver = nil
 		resolver.DefaultHostMapper = nil
-		resolver.DefaultLocalServer = nil
+		resolver.DefaultService = nil
 		resolver.ProxyServerHostResolver = nil
 		resolver.DirectHostResolver = nil
 		dns.ReCreateServer("", nil, nil)
 		return
 	}
-	cfg := dns.Config{
+
+	ipv6 := c.IPv6 && generalIPv6
+	r := dns.NewResolver(dns.Config{
 		Main:                 c.NameServer,
 		Fallback:             c.Fallback,
-		IPv6:                 c.IPv6 && generalIPv6,
+		IPv6:                 ipv6,
 		IPv6Timeout:          c.IPv6Timeout,
-		EnhancedMode:         c.EnhancedMode,
-		Pool:                 c.FakeIPRange,
-		Hosts:                c.Hosts,
 		FallbackIPFilter:     c.FallbackIPFilter,
 		FallbackDomainFilter: c.FallbackDomainFilter,
+		FallbackLazyQuery:    c.FallbackLazyQuery,
 		Default:              c.DefaultNameserver,
 		Policy:               c.NameServerPolicy,
 		ProxyServer:          c.ProxyServerNameserver,
+		ProxyServerPolicy:    c.ProxyServerPolicy,
 		DirectServer:         c.DirectNameServer,
 		DirectFollowPolicy:   c.DirectFollowPolicy,
 		CacheAlgorithm:       c.CacheAlgorithm,
 		CacheMaxSize:         c.CacheMaxSize,
-	}
-
-	r := dns.NewResolver(cfg)
-	m := dns.NewEnhancer(cfg)
+	})
+	m := dns.NewEnhancer(dns.EnhancerConfig{
+		IPv6:          ipv6,
+		EnhancedMode:  c.EnhancedMode,
+		FakeIPPool:    c.FakeIPPool,
+		FakeIPPool6:   c.FakeIPPool6,
+		FakeIPSkipper: c.FakeIPSkipper,
+		FakeIPTTL:     c.FakeIPTTL,
+		UseHosts:      c.UseHosts,
+	})
 
 	// reuse cache of old host mapper
 	if old := resolver.DefaultHostMapper; old != nil {
 		m.PatchFrom(old.(*dns.ResolverEnhancer))
 	}
 
+	s := dns.NewService(r, m)
+
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
-	resolver.DefaultLocalServer = dns.NewLocalServer(r.Resolver, m)
+	resolver.DefaultService = s
 	resolver.UseSystemHosts = c.UseSystemHosts
 
 	if r.ProxyResolver.Invalid() {
@@ -290,25 +303,27 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 		resolver.DirectHostResolver = r.Resolver
 	}
 
-	dns.ReCreateServer(c.Listen, r.Resolver, m)
+	lc := inbound.NewListenConfig()
+	lc.SetRouteMark(c.ListenRoutingMark)
+	dns.ReCreateServer(c.Listen, lc, s)
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
 	resolver.DefaultHosts = resolver.NewHosts(tree)
 }
 
-func updateProxies(proxies map[string]C.Proxy, providers map[string]provider.ProxyProvider) {
+func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
 	tunnel.UpdateProxies(proxies, providers)
 }
 
-func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]provider.RuleProvider) {
+func updateRules(rules []C.Rule, subRules map[string][]C.Rule, ruleProviders map[string]P.RuleProvider) {
 	tunnel.UpdateRules(rules, subRules, ruleProviders)
 }
 
-func loadProvider[P provider.Provider](providers map[string]P) {
-	load := func(pv P) {
+func loadProvider[T P.Provider](providers map[string]T) {
+	load := func(pv T) {
 		name := pv.Name()
-		if pv.VehicleType() == provider.Compatible {
+		if pv.VehicleType() == P.Compatible {
 			log.Infoln("Start initial compatible provider %s", name)
 		} else {
 			log.Infoln("Start initial provider %s", name)
@@ -316,11 +331,11 @@ func loadProvider[P provider.Provider](providers map[string]P) {
 
 		if err := pv.Initial(); err != nil {
 			switch pv.Type() {
-			case provider.Proxy:
+			case P.Proxy:
 				{
 					log.Errorln("initial proxy provider %s error: %v", name, err)
 				}
-			case provider.Rule:
+			case P.Rule:
 				{
 					log.Errorln("initial rule provider %s error: %v", name, err)
 				}
@@ -365,6 +380,9 @@ func updateUpdater(cfg *config.Config) {
 	general := cfg.General
 	updater.SetGeoAutoUpdate(general.GeoAutoUpdate)
 	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
+
+	updater.SetLgbmAutoUpdate(general.LgbmAutoUpdate)
+	updater.SetLgbmUpdateInterval(general.LgbmUpdateInterval)
 
 	controller := cfg.Controller
 	updater.DefaultUiUpdater = updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
@@ -414,10 +432,10 @@ func updateGeneral(general *config.General, logging bool) {
 	geodata.SetGeoSiteUrl(general.GeoXUrl.GeoSite)
 	geodata.SetMmdbUrl(general.GeoXUrl.Mmdb)
 	geodata.SetASNUrl(general.GeoXUrl.ASN)
+	lightgbm.SetLgbmUrl(general.LgbmUrl)
+	lightgbm.InitCollector(general.SmartCollectorSize)
 	mihomoHttp.SetUA(general.GlobalUA)
 	resource.SetETag(general.ETagSupport)
-
-	tlsC.SetGlobalFingerprint(general.GlobalClientFingerprint)
 }
 
 func updateUsers(users []auth.AuthUser) {
@@ -443,12 +461,7 @@ func patchSelectGroup(proxies map[string]C.Proxy) {
 		return
 	}
 
-	for name, proxy := range proxies {
-		outbound, ok := proxy.(C.Proxy)
-		if !ok {
-			continue
-		}
-
+	for name, outbound := range proxies {
 		selector, ok := outbound.Adapter().(outboundgroup.SelectAble)
 		if !ok {
 			continue
@@ -526,10 +539,23 @@ func updateIPTables(cfg *config.Config) {
 	log.Infoln("[IPTABLES] Setting iptables completed")
 }
 
+func closeSmart() {
+	for _, proxy := range tunnel.Proxies() {
+		if proxy.Type() == C.Smart {
+			adapter := proxy.Adapter()
+			if smart, ok := adapter.(*outboundgroup.Smart); ok {
+				smart.Close()
+			}
+		}
+	}
+}
+
 func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+
+	closeSmart()
 
 	log.Warnln("Mihomo shutting down")
 }

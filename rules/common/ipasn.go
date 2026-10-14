@@ -8,7 +8,7 @@ import (
 )
 
 type ASN struct {
-	*Base
+	Base
 	asn         string
 	adapter     string
 	noResolveIP bool
@@ -29,10 +29,18 @@ func (a *ASN) Match(metadata *C.Metadata, helper C.RuleMatchHelper) (bool, strin
 	}
 
 	asn, aso := mmdb.ASNInstance().LookupASN(ip.AsSlice())
-	if a.isSourceIP {
-		metadata.SrcIPASN = asn + " " + aso
+	// preventing smart duplicate lookup
+	var asnInfo string
+	if asn == "" {
+		asnInfo = "unknown"
 	} else {
-		metadata.DstIPASN = asn + " " + aso
+		asnInfo = asn + " " + aso
+	}
+
+	if a.isSourceIP {
+		metadata.SrcIPASN = asnInfo
+	} else {
+		metadata.DstIPASN = asnInfo
 	}
 
 	return a.asn == asn, a.adapter
@@ -64,10 +72,12 @@ func NewIPASN(asn string, adapter string, isSrc, noResolveIP bool) (*ASN, error)
 	}
 
 	return &ASN{
-		Base:        &Base{},
+		Base:        Base{},
 		asn:         asn,
 		adapter:     adapter,
 		noResolveIP: noResolveIP,
 		isSourceIP:  isSrc,
 	}, nil
 }
+
+var _ C.Rule = (*ASN)(nil)

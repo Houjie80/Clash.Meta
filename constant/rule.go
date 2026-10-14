@@ -1,5 +1,7 @@
 package constant
 
+import "time"
+
 // Rule Type
 const (
 	Domain RuleType = iota
@@ -27,6 +29,9 @@ const (
 	ProcessPath
 	ProcessNameRegex
 	ProcessPathRegex
+	ProcessNameWildcard
+	ProcessPathWildcard
+	RematchName
 	RuleSet
 	Network
 	Uid
@@ -38,6 +43,24 @@ const (
 )
 
 type RuleType int
+
+var SmartRuleTypes = map[RuleType]bool{
+	Domain:            true,
+	DomainSuffix:      true,
+	DomainKeyword:     true,
+	DomainRegex:       true,
+	DomainWildcard:    true,
+	GEOSITE:           true,
+	GEOIP:             true,
+	IPASN:             true,
+	IPCIDR:            true,
+	IPSuffix:          true,
+	RuleSet:           true,
+	SubRules:          true,
+	AND:               true,
+	OR:                true,
+	NOT:               true,
+}
 
 func (rt RuleType) String() string {
 	switch rt {
@@ -89,6 +112,12 @@ func (rt RuleType) String() string {
 		return "ProcessNameRegex"
 	case ProcessPathRegex:
 		return "ProcessPathRegex"
+	case ProcessNameWildcard:
+		return "ProcessNameWildcard"
+	case ProcessPathWildcard:
+		return "ProcessPathWildcard"
+	case RematchName:
+		return "RematchName"
 	case MATCH:
 		return "Match"
 	case RuleSet:
@@ -120,9 +149,31 @@ type Rule interface {
 	ProviderNames() []string
 }
 
+type RuleWrapper interface {
+	Rule
+
+	// SetDisabled to set enable/disable rule
+	SetDisabled(v bool)
+	// IsDisabled return rule is disabled or not
+	IsDisabled() bool
+
+	// HitCount for statistics
+	HitCount() uint64
+	// HitAt for statistics
+	HitAt() time.Time
+	// MissCount for statistics
+	MissCount() uint64
+	// MissAt for statistics
+	MissAt() time.Time
+
+	// Unwrap return Rule
+	Unwrap() Rule
+}
+
 type RuleMatchHelper struct {
-	ResolveIP   func()
-	FindProcess func()
+	ResolveIP     func()
+	FindProcess   func()
+	CheckPassRule func(adapterName string) bool
 }
 
 type RuleGroup interface {

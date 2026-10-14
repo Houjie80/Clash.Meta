@@ -3,16 +3,14 @@ package route
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/metacubex/mihomo/tunnel/statistic"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/render"
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
+	"github.com/metacubex/chi"
+	"github.com/metacubex/chi/render"
+	"github.com/metacubex/http"
 )
 
 func connectionRouter() http.Handler {
@@ -20,6 +18,7 @@ func connectionRouter() http.Handler {
 	r.Get("/", getConnections)
 	r.Delete("/", closeAllConnections)
 	r.Delete("/{id}", closeConnection)
+	r.Delete("/smart/{id}", setSmartBlock)
 	return r
 }
 
@@ -30,7 +29,7 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, _, _, err := ws.UpgradeHTTP(r, w)
+	conn, _, err := wsUpgrade(r, w)
 	if err != nil {
 		return
 	}
@@ -56,7 +55,7 @@ func getConnections(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
-		return wsutil.WriteMessage(conn, ws.StateServerSide, ws.OpText, buf.Bytes())
+		return wsWriteServerText(conn, buf.Bytes())
 	}
 
 	if err := sendSnapshot(); err != nil {
@@ -85,5 +84,14 @@ func closeAllConnections(w http.ResponseWriter, r *http.Request) {
 		_ = c.Close()
 		return true
 	})
+	render.NoContent(w, r)
+}
+
+func setSmartBlock(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if c := statistic.DefaultManager.Get(id); c != nil {
+		c.Info().Metadata.SmartBlock = "blocked"
+		_ = c.Close()
+	}
 	render.NoContent(w, r)
 }
